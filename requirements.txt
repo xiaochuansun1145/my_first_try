@@ -1,0 +1,25 @@
+# CPU-friendly baseline for GitHub Codespaces.
+# If you later need CUDA, replace torch/torchvision with the official GPU wheels.
+
+# Core deep learning stack: model definition, training, inference.
+torch>=2.2,<2.6
+torchvision>=0.17,<0.21
+transformers>=4.39,<5.0
+
+# Common research utilities: arrays, configs, progress bars, image I/O.
+numpy>=1.26,<3.0
+scipy>=1.11,<2.0
+PyYAML>=6.0,<7.0
+tqdm>=4.66,<5.0
+Pillow>=10.0,<12.0
+matplotlib>=3.8,<4.0
+
+# Video/frame processing for offline experiments.
+opencv-python>=4.9,<5.0
+
+# Detection evaluation: COCO-style mAP metrics.
+pycocotools>=2.0.7,<3.0
+
+# Communication/perceptual metrics: PSNR, SSIM, LPIPS.
+scikit-image>=0.22,<0.26
+lpips>=0.1.4,<0.2

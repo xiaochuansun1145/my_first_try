@@ -1,36 +1,41 @@
 ## Plan: RT-DETR 与 MDVSC 联合系统 Brief
 
+说明：当前项目的统一公共上下文定义见 [docs/project_context.md](docs/project_context.md)。本文件保留为里程碑计划与执行摘要，不再单独承担全部架构定义职责。
+
 目标是在绿地工程中，把 RT-DETR 在 encoder 后切开，将多尺度 feature map 交给可改造的 MDVSC 语义通信模块传输，在接收端恢复可供 decoder/head 使用的语义表示，形成“视频语义传输 + 目标检测”联合系统。首版聚焦离线实验管线，采用双目标平衡策略，同时验证检测精度、传输码率/失真与系统可训练性。
 
 **Steps**
-1. 定义端到端链路：发送端完成视频帧采样、RT-DETR backbone+encoder 前向、feature map 打包；信道侧完成压缩/信道模拟/解码；接收端完成 feature 恢复、RT-DETR decoder/head 推理与评测。
-2. 明确接口与张量契约：固定 encoder 输出层数、shape、dtype、batch 组织、多尺度对齐方式，以及 MDVSC 模块的输入输出协议。此步骤阻塞后续训练与评测设计。
+1. 定义端到端链路：发送端完成视频 GOP 采样、RT-DETR backbone+encoder 前向、per-level adaptor 与 latent 压缩、时间公共/个体语义分解；信道侧完成压缩表示传输与信道模拟；接收端完成语义恢复、per-level refinement、检测分支与重建分支推理和评测。
+2. 明确接口与张量契约：固定 encoder 输出层数、shape、dtype、batch 与时间维组织、多尺度对齐方式，以及 MDVSC latent packet、公共/个体分支、重建分支的输入输出协议。此步骤阻塞后续训练与评测设计。
 3. 先做最小可行闭环：单路视频输入、单一数据集、固定信道条件、单模型配置，跑通推理和离线评测；暂不追求实时性与复杂自适应策略。*优先级最高*
-4. 建立联合优化方案：以检测损失为主任务，叠加语义传输相关损失（码率、重建/感知或特征一致性），并定义训练阶段是分阶段训练还是端到端微调。*依赖 2*
+4. 建立联合优化方案：先训练无语义通信的检测/重建双头上界模型，再插入 MDVSC 模块做结构逼近和信道感知训练，最后做分层解冻的整体微调。损失由检测、重建、特征一致性、码率和时序一致性共同构成。*依赖 2*
 5. 建立评测面板：检测侧看 mAP；通信侧看码率、PSNR/SSIM/LPIPS 或特征恢复误差；系统侧看时延、显存、吞吐。*可与 4 并行推进*
 6. 在 MVP 稳定后，再扩展到多信道条件、切点对比、压缩率扫描和消融实验。
 
 **Relevant files**
-- /workspaces/my_first_try/README.md — 当前仅有最小占位，可作为后续项目说明入口。
-- /workspaces/my_first_try/src — 当前为空，后续适合按 detector、semantic_comm、pipeline、metrics 分层。
-- /workspaces/my_first_try/configs — 当前为空，后续放模型、训练、信道与数据配置。
-- /workspaces/my_first_try/scripts — 当前为空，后续放训练、推理、评测脚本入口。
-- /workspaces/my_first_try/tests — 当前为空，后续补接口契约与最小集成测试。
+- /workspaces/my_first_try/README.md — 当前项目入口文档，汇总快速开始、当前阶段与核心设计文档链接。
+- /workspaces/my_first_try/src — 已包含 detector、semantic_comm、pipeline 等基础模块，是后续项目版 MDVSC 与训练代码的主要落点。
+- /workspaces/my_first_try/configs — 已包含 RT-DETR baseline 与 semcom MVP 配置，后续继续扩展训练、数据与信道配置。
+- /workspaces/my_first_try/scripts — 已包含 baseline、semcom pipeline 与 sweep 入口，后续补训练与系统级评测脚本。
+- /workspaces/my_first_try/tests — 已包含接口契约与特征信道最小测试，后续继续补联合模型与训练相关测试。
 
 **Verification**
 1. 用固定样例视频跑通发送端 encoder 输出到接收端 decoder 输入，验证 feature map shape、数值范围与尺度对齐完全一致。
-2. 在单一数据集上完成一次离线推理，输出检测结果与通信指标，确认端到端链路闭环成立。
+2. 在单一数据集上完成一次离线推理，输出检测结果、重建结果与通信指标，确认端到端链路闭环成立。
 3. 做无信道退化与有信道退化两组对照，确认系统在理想信道下接近原始 RT-DETR 基线，在退化信道下呈现可解释的精度下降。
-4. 对训练/推理日志记录码率、mAP、时延和显存，确保后续里程碑可比较。
+4. 对训练/推理日志记录码率、mAP、重建指标、时延和显存，确保后续里程碑可比较。
 
 **Decisions**
 - 输入切点定为 RT-DETR encoder 后，传输整个 feature map，而不是像素级视频或 decoder 输出。
 - 通信侧存在一版简化实现，默认允许重构，不将现有接口视为稳定约束。
 - 首版交付是离线实验管线，不包含实时 demo、在线服务或部署优化。
-- 目标是检测与传输双目标平衡，不为单一指标极致优化。
+- 目标是检测、重建与传输三者联合平衡，不为单一指标极致优化。
+- 视频输入是系统级固定前提；单图实验仅用于接口与信道调试，不定义最终模型语义。
+- 实际压缩发生在 latent 域；不直接把原始三层 RT-DETR 语义图作为最终传输格式。
+- 公共语义与个体语义的分支设计默认保留，且接收端包含额外的重建支路。
 - 规划范围不包含论文写作、SOTA 横向竞赛、专用硬件适配。
 
 **Further Considerations**
-1. 建议优先明确“传输哪几层 encoder feature”与“是否需要额外 feature adaptor”，否则后续模块边界会频繁返工。
-2. 建议 MVP 首先固定一个公开数据集与一组典型信道参数，避免系统、数据、信道三条轴同时变化导致难以定位问题。
-3. 建议先采用分阶段训练作为保守起点：先冻结检测主干验证通信闭环，再尝试端到端联合微调。
+1. 第一版默认技术路线已经固定为：全部 level 参与传输，latent 维度采用 48/64/96，公共分支按单通道独立选择是否保留，个体分支按空间块结构化稀疏。后续如需调整，应通过小规模消融验证后再改动。
+2. 建议 MVP 首先固定一个公开视频数据集、一个 GOP 长度和一组典型信道参数，避免系统、数据、信道三条轴同时变化导致难以定位问题。
+3. 建议先采用“上界模型 -> 通信模块逼近 -> 信道训练 -> 分层微调”的分阶段训练路线，而不是一开始就把双任务和通信模型一起端到端训练。

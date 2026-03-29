@@ -1,0 +1,57 @@
+from __future__ import annotations
+
+import unittest
+
+import torch
+
+from src.semantic_rtdetr.semantic_comm.mdvsc import ProjectMDVSC
+
+
+class ProjectMDVSCTest(unittest.TestCase):
+    def test_forward_preserves_multiscale_shapes(self) -> None:
+        model = ProjectMDVSC(
+            feature_channels=[16, 16, 16],
+            latent_dims=[8, 8, 8],
+            common_keep_ratios=[0.5, 0.5, 0.5],
+            individual_keep_ratios=[0.25, 0.25, 0.25],
+            block_sizes=[4, 2, 1],
+        )
+        inputs = [
+            torch.randn(2, 3, 16, 8, 8),
+            torch.randn(2, 3, 16, 4, 4),
+            torch.randn(2, 3, 16, 2, 2),
+        ]
+
+        outputs = model(inputs, output_size=(64, 64), apply_masks=False, channel_mode="identity")
+
+        self.assertEqual(len(outputs.restored_sequences), 3)
+        self.assertEqual(outputs.restored_sequences[0].shape, inputs[0].shape)
+        self.assertEqual(outputs.restored_sequences[1].shape, inputs[1].shape)
+        self.assertEqual(outputs.restored_sequences[2].shape, inputs[2].shape)
+        self.assertEqual(outputs.reconstructed_frames.shape, (2, 3, 3, 64, 64))
+
+    def test_mask_stats_stay_in_unit_interval(self) -> None:
+        model = ProjectMDVSC(
+            feature_channels=[8, 8, 8],
+            latent_dims=[4, 4, 4],
+            common_keep_ratios=[0.5, 0.5, 0.5],
+            individual_keep_ratios=[0.25, 0.25, 0.25],
+            block_sizes=[2, 2, 1],
+        )
+        inputs = [
+            torch.randn(1, 2, 8, 4, 4),
+            torch.randn(1, 2, 8, 2, 2),
+            torch.randn(1, 2, 8, 1, 1),
+        ]
+
+        outputs = model(inputs, output_size=(32, 32), apply_masks=True, channel_mode="identity")
+
+        for stat in outputs.level_stats:
+            self.assertGreaterEqual(stat.common_active_ratio, 0.0)
+            self.assertLessEqual(stat.common_active_ratio, 1.0)
+            self.assertGreaterEqual(stat.individual_active_ratio, 0.0)
+            self.assertLessEqual(stat.individual_active_ratio, 1.0)
+
+
+if __name__ == "__main__":
+    unittest.main()

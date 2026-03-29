@@ -1,0 +1,1 @@
+"""Detector wrappers used by the baseline pipeline."""

@@ -1,0 +1,12 @@
+model:
+  hf_name: PekingU/rtdetr_r50vd
+  device: auto
+  threshold: 0.3
+
+input:
+  image_path:
+
+output:
+  output_dir: outputs/rtdetr_baseline
+  save_features: true
+  save_visualization: true

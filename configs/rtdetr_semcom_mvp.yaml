@@ -1,0 +1,21 @@
+model:
+  hf_name: PekingU/rtdetr_r50vd
+  device: auto
+  threshold: 0.3
+
+input:
+  image_path:
+
+output:
+  output_dir: outputs/rtdetr_semcom_mvp
+  save_features: true
+  save_visualization: true
+
+channel:
+  mode: identity
+  snr_db: 20.0
+  seed: 0
+
+semcom:
+  selected_levels: [0, 1, 2]
+  adaptor: identity
