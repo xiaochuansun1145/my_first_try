@@ -77,7 +77,7 @@ class RTDetrBaseline:
         processed = self.image_processor(images=images, return_tensors="pt")
         return {name: tensor.to(self.device) for name, tensor in processed.items()}
 
-    @torch.inference_mode()
+    @torch.no_grad()
     def predict(self, inputs: dict[str, torch.Tensor]):
         return self.model(**inputs, return_dict=True)
 
