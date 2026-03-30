@@ -37,19 +37,27 @@ RT-DETR 与 MDVSC 联合视频语义传输与目标检测研究项目。
 python -m pip install -r requirements.txt
 ```
 
-2. 使用一张图运行基线脚本：
+2. 先把 RT-DETR 权重下载到项目目录：
+
+```bash
+python scripts/download_rtdetr_weights.py
+```
+
+默认会下载到 `pretrained/rtdetr_r50vd/`。当前配置已经默认优先使用这个本地目录；目录存在时，后续训练和推理不会再走线上下载。
+
+3. 使用一张图运行基线脚本：
 
 ```bash
 python scripts/run_rtdetr_baseline.py --image /absolute/path/to/example.jpg
 ```
 
-3. 可选：使用 YAML 配置作为默认入口：
+4. 可选：使用 YAML 配置作为默认入口：
 
 ```bash
 python scripts/run_rtdetr_baseline.py --config configs/rtdetr_baseline.yaml --image /absolute/path/to/example.jpg
 ```
 
-4. 运行语义通信最小可行管线：
+5. 运行语义通信最小可行管线：
 
 ```bash
 python scripts/run_semcom_pipeline.py --config configs/rtdetr_semcom_mvp.yaml --image /absolute/path/to/example.jpg

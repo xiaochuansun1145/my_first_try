@@ -26,11 +26,36 @@ class RoundTripComparison:
 
 
 class RTDetrBaseline:
-    def __init__(self, model_name: str, device: str = "auto"):
+    def __init__(
+        self,
+        model_name: str,
+        device: str = "auto",
+        local_path: str | Path | None = None,
+        cache_dir: str | Path | None = None,
+    ):
         self.device = self._resolve_device(device)
-        self.image_processor = AutoImageProcessor.from_pretrained(model_name)
-        self.model = RTDetrForObjectDetection.from_pretrained(model_name).to(self.device)
+        self.model_source = self._resolve_model_source(model_name, local_path)
+        load_kwargs: dict[str, Any] = {}
+        if cache_dir is not None:
+            load_kwargs["cache_dir"] = str(cache_dir)
+
+        self.image_processor = AutoImageProcessor.from_pretrained(self.model_source, **load_kwargs)
+        self.model = RTDetrForObjectDetection.from_pretrained(self.model_source, **load_kwargs).to(self.device)
         self.model.eval()
+
+    @staticmethod
+    def _resolve_model_source(model_name: str, local_path: str | Path | None) -> str:
+        if local_path is None:
+            return model_name
+
+        candidate = Path(local_path)
+        if not candidate.is_absolute():
+            repo_root = Path(__file__).resolve().parents[3]
+            candidate = repo_root / candidate
+
+        if candidate.is_dir():
+            return str(candidate)
+        return model_name
 
     @staticmethod
     def _resolve_device(device: str) -> torch.device:

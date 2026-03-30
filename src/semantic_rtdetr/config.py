@@ -9,6 +9,8 @@ import yaml
 @dataclass(frozen=True)
 class ModelConfig:
     hf_name: str = "PekingU/rtdetr_r50vd"
+    local_path: str | None = "pretrained/rtdetr_r50vd"
+    cache_dir: str | None = None
     device: str = "auto"
     threshold: float = 0.3
 

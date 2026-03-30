@@ -22,6 +22,8 @@ def _as_float_list(values: list[Any] | tuple[Any, ...] | None, default: list[flo
 @dataclass(frozen=True)
 class Stage1DetectorConfig:
     hf_name: str = "PekingU/rtdetr_r50vd"
+    local_path: str | None = "pretrained/rtdetr_r50vd"
+    cache_dir: str | None = None
     device: str = "auto"
 
 

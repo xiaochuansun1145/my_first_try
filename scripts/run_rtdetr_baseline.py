@@ -38,7 +38,12 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
 
     image = Image.open(image_path).convert("RGB")
-    baseline = RTDetrBaseline(config.model.hf_name, device=config.model.device)
+    baseline = RTDetrBaseline(
+        config.model.hf_name,
+        device=config.model.device,
+        local_path=config.model.local_path,
+        cache_dir=config.model.cache_dir,
+    )
     inputs = baseline.prepare_inputs(image)
 
     direct_outputs = baseline.predict(inputs)

@@ -1,5 +1,7 @@
 model:
   hf_name: PekingU/rtdetr_r50vd
+  local_path: pretrained/rtdetr_r50vd
+  cache_dir:
   device: auto
   threshold: 0.3
 

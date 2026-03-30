@@ -17,13 +17,11 @@
 1. 你本地或服务器上有可读的视频帧数据。
 2. 运行环境能够拿到 RT-DETR teacher 权重。
 
-注意：仓库里不直接存放 RT-DETR 权重。训练和推理时，代码会调用 Hugging Face 的 `from_pretrained(...)` 去自动下载，或者直接命中已有缓存。
+现在仓库已经支持把 RT-DETR 权重提前下载到项目目录里。默认配置会优先读取：
 
-这意味着：
+- `pretrained/rtdetr_r50vd/`
 
-- 如果服务器能联网，第一次跑时会自动下载；
-- 如果服务器不能联网，你需要事先准备好 Hugging Face 缓存；
-- 如果之前这台机器已经跑过同一个模型，可能已经有缓存，因此不会再次下载。
+如果这个目录存在，训练和推理会直接从本地加载，不再向 Hugging Face 发起下载请求；如果目录不存在，代码才会回退到 `hf_name` 对应的远端仓库。
 
 ## 二、服务器环境准备
 
@@ -32,7 +30,7 @@
 - Linux 服务器；
 - Python 3.10 及以上；
 - GPU 优先，没有 GPU 也能跑，但会慢很多；
-- 能访问 Hugging Face，或者已经准备好本地缓存。
+- 首次准备权重时能访问 Hugging Face，或者你已经从别的机器拷贝好了本地权重目录。
 
 建议安装流程：
 
@@ -43,9 +41,37 @@ python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
+python scripts/download_rtdetr_weights.py
 ```
 
 如果你使用 conda，也可以换成自己的环境管理方式，但核心是确保 `requirements.txt` 里的依赖都已安装。
+
+下载脚本执行完成后，权重默认位于：
+
+```text
+pretrained/
+  rtdetr_r50vd/
+```
+
+如果你想放到别的位置，也可以手动指定：
+
+```bash
+python scripts/download_rtdetr_weights.py --output-dir /absolute/path/to/custom_rtdetr_r50vd
+```
+
+这时请同步修改对应 YAML 里的：
+
+```yaml
+model:
+  local_path: /absolute/path/to/custom_rtdetr_r50vd
+```
+
+或者第一阶段训练配置里的：
+
+```yaml
+detector:
+  local_path: /absolute/path/to/custom_rtdetr_r50vd
+```
 
 ## 三、数据目录怎么准备
 
@@ -141,6 +167,8 @@ data:
 
 ### 模型相关
 
+- `detector.local_path`：RT-DETR 本地权重目录，默认是 `pretrained/rtdetr_r50vd`。
+- `detector.cache_dir`：可选的 Hugging Face 缓存目录。
 - `mdvsc.apply_masks`：当前建议保持 `true`。
 - `mdvsc.channel_mode`：第一阶段建议先用 `identity`。
 - `mdvsc.latent_dims`：当前默认是 48 / 64 / 96。
@@ -171,6 +199,8 @@ mdvsc:
 最推荐命令：
 
 ```bash
+python scripts/download_rtdetr_weights.py
+
 python scripts/train_mdvsc_stage1.py \
   --config configs/mdvsc_stage1_imagenet_vid_subset.yaml \
   --data /absolute/path/to/ILSVRC/Data/VID/train
@@ -286,11 +316,23 @@ python scripts/plot_stage1_metrics.py --metrics outputs/mdvsc_stage1_imagenet_vi
 
 ### 1. 第一次运行很慢
 
-通常是因为第一次下载 Hugging Face 权重，这是正常现象。
+通常是因为第一次下载 RT-DETR 权重。建议先单独执行一次：
+
+```bash
+python scripts/download_rtdetr_weights.py
+```
+
+这样后面正式训练时就不会再临时下载。
 
 ### 2. 服务器无法下载 RT-DETR 权重
 
-需要提前把 Hugging Face 缓存准备好，或通过可联网机器先下载后复制过去。
+可以在可联网机器上先执行：
+
+```bash
+python scripts/download_rtdetr_weights.py
+```
+
+然后把整个 `pretrained/rtdetr_r50vd/` 目录拷贝到服务器项目根目录下。只要配置里的 `detector.local_path` 指向这个目录，训练就可以离线启动。
 
 ### 3. 数据目录识别不到
 

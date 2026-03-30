@@ -5,6 +5,7 @@
 torch>=2.2,<2.6
 torchvision>=0.17,<0.21
 transformers>=4.39,<5.0
+huggingface_hub>=0.23,<1.0
 
 # Common research utilities: arrays, configs, progress bars, image I/O.
 numpy>=1.26,<3.0

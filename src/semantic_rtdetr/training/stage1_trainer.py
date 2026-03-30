@@ -53,7 +53,12 @@ class Stage1Trainer:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         _set_seed(config.optimization.seed)
 
-        self.baseline = RTDetrBaseline(config.detector.hf_name, device=config.detector.device)
+        self.baseline = RTDetrBaseline(
+            config.detector.hf_name,
+            device=config.detector.device,
+            local_path=config.detector.local_path,
+            cache_dir=config.detector.cache_dir,
+        )
         for parameter in self.baseline.model.parameters():
             parameter.requires_grad = False
         self.baseline.model.eval()

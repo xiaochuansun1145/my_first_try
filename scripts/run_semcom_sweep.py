@@ -59,7 +59,12 @@ def main() -> None:
 
     results: list[dict[str, object]] = []
     level_sets = [parse_level_set(raw_levels) for raw_levels in args.level_sets]
-    baseline = RTDetrBaseline(base_config.model.hf_name, device=base_config.model.device)
+    baseline = RTDetrBaseline(
+        base_config.model.hf_name,
+        device=base_config.model.device,
+        local_path=base_config.model.local_path,
+        cache_dir=base_config.model.cache_dir,
+    )
 
     for level_set in level_sets:
         identity_config = replace(

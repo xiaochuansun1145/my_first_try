@@ -23,7 +23,12 @@ def run_semcom_experiment(
         raise FileNotFoundError(f"Image not found: {resolved_image_path}")
 
     image = Image.open(resolved_image_path).convert("RGB")
-    active_baseline = baseline or RTDetrBaseline(config.model.hf_name, device=config.model.device)
+    active_baseline = baseline or RTDetrBaseline(
+        config.model.hf_name,
+        device=config.model.device,
+        local_path=config.model.local_path,
+        cache_dir=config.model.cache_dir,
+    )
     inputs = active_baseline.prepare_inputs(image)
 
     direct_outputs = active_baseline.predict(inputs)
@@ -94,7 +99,12 @@ def save_semcom_artifacts(
         torch.save(artifacts["received_bundle"].to_tensor_dict(), resolved_output_dir / "received_encoder_features.pt")
 
     if config.output.save_visualization:
-        baseline = RTDetrBaseline(config.model.hf_name, device=config.model.device)
+        baseline = RTDetrBaseline(
+            config.model.hf_name,
+            device=config.model.device,
+            local_path=config.model.local_path,
+            cache_dir=config.model.cache_dir,
+        )
         baseline.save_visualization(
             artifacts["image"],
             artifacts["baseline_detections"],
