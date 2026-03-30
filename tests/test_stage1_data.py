@@ -26,6 +26,7 @@ class Stage1DataTest(unittest.TestCase):
                     dataset_name="imagenet_vid",
                     train_source_path=str(root),
                     recursive=True,
+                    index_cache_dir=str(root / ".cache"),
                     gop_size=4,
                     frame_height=32,
                     frame_width=32,
@@ -40,6 +41,8 @@ class Stage1DataTest(unittest.TestCase):
             sample = dataset[0]
             self.assertEqual(len(dataset), 2)
             self.assertEqual(tuple(sample.shape), (4, 3, 32, 32))
+            self.assertFalse(dataset.index_cache_hit)
+            self.assertTrue(Path(dataset.index_cache_path).exists())
 
     def test_fractional_subset_can_take_partial_dataset(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -55,6 +58,7 @@ class Stage1DataTest(unittest.TestCase):
                 Stage1DataConfig(
                     train_source_path=str(root),
                     recursive=True,
+                    index_cache_dir=str(root / ".cache"),
                     subset_seed=7,
                     source_fraction=0.4,
                     sample_fraction=0.5,
@@ -68,7 +72,26 @@ class Stage1DataTest(unittest.TestCase):
             )
 
             self.assertGreaterEqual(len(dataset), 1)
-            self.assertLess(len(dataset), 10)
+            self.assertLessEqual(len(dataset), 2)
+
+            dataset_again = VideoGOPDataset(
+                Stage1DataConfig(
+                    train_source_path=str(root),
+                    recursive=True,
+                    index_cache_dir=str(root / ".cache"),
+                    subset_seed=7,
+                    source_fraction=0.4,
+                    sample_fraction=0.5,
+                    gop_size=4,
+                    frame_height=24,
+                    frame_width=24,
+                    frame_stride=1,
+                    gop_stride=1,
+                ),
+                str(root),
+            )
+
+            self.assertTrue(dataset_again.index_cache_hit)
 
 
 if __name__ == "__main__":

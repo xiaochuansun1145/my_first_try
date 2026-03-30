@@ -9,6 +9,7 @@ data:
   train_source_path:
   val_source_path:
   recursive: true
+  index_cache_dir: .cache/stage1_data
   subset_seed: 42
   source_fraction: 0.2
   sample_fraction: 0.2

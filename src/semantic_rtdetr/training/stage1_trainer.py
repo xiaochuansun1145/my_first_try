@@ -11,7 +11,7 @@ import torch
 import torch.nn.functional as F
 from torch.nn.utils import clip_grad_norm_
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
 
 from src.semantic_rtdetr.contracts import EncoderFeatureBundle
@@ -19,6 +19,17 @@ from src.semantic_rtdetr.detector.rtdetr_baseline import RTDetrBaseline
 from src.semantic_rtdetr.semantic_comm.mdvsc import MDVSCOutput, ProjectMDVSC
 from src.semantic_rtdetr.training.stage1_config import MDVSCStage1TrainConfig
 from src.semantic_rtdetr.training.stage1_data import build_train_val_datasets
+
+
+def _dataset_summary(dataset) -> dict[str, Any]:
+    base_dataset = dataset.dataset if isinstance(dataset, Subset) else dataset
+    if hasattr(base_dataset, "summary"):
+        summary = dict(base_dataset.summary())
+        summary["visible_samples"] = len(dataset)
+        if isinstance(dataset, Subset):
+            summary["subset_type"] = "random_split"
+        return summary
+    return {"visible_samples": len(dataset)}
 
 
 def _set_seed(seed: int) -> None:
@@ -53,6 +64,8 @@ class Stage1Trainer:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         _set_seed(config.optimization.seed)
 
+        print("[stage1] Loading RT-DETR teacher", flush=True)
+
         self.baseline = RTDetrBaseline(
             config.detector.hf_name,
             device=config.detector.device,
@@ -77,6 +90,7 @@ class Stage1Trainer:
         )
         self.scheduler = self._build_scheduler()
 
+        print("[stage1] Building train/val datasets", flush=True)
         train_dataset, val_dataset = build_train_val_datasets(config.data, seed=config.optimization.seed)
         self.dataset_info = {
             "dataset_name": config.data.dataset_name,
@@ -84,7 +98,14 @@ class Stage1Trainer:
             "val_num_samples": len(val_dataset) if val_dataset is not None else 0,
             "train_source_path": config.data.train_source_path,
             "val_source_path": config.data.val_source_path,
+            "train_dataset": _dataset_summary(train_dataset),
+            "val_dataset": _dataset_summary(val_dataset) if val_dataset is not None else None,
         }
+        print(
+            f"[stage1] Dataset ready: train={self.dataset_info['train_num_samples']} samples, "
+            f"val={self.dataset_info['val_num_samples']} samples",
+            flush=True,
+        )
         pin_memory = self.baseline.device.type == "cuda"
         self.train_loader = DataLoader(
             train_dataset,
@@ -102,6 +123,7 @@ class Stage1Trainer:
                 num_workers=config.optimization.num_workers,
                 pin_memory=pin_memory,
             )
+            print("[stage1] DataLoader initialization complete", flush=True)
 
     def run(self) -> dict[str, Any]:
         metrics_path = self.output_dir / "metrics.jsonl"
@@ -113,6 +135,7 @@ class Stage1Trainer:
         best_val_loss: float | None = None
         last_summary: dict[str, Any] | None = None
         for epoch in range(1, self.config.optimization.epochs + 1):
+            print(f"[stage1] Starting epoch {epoch}/{self.config.optimization.epochs}", flush=True)
             train_metrics = self._run_epoch(self.train_loader, training=True, epoch=epoch)
             val_metrics = None
             if self.val_loader is not None:

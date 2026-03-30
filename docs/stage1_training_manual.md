@@ -82,6 +82,8 @@ detector:
 
 训练器也支持递归扫描一个根目录，因此你可以直接把多个序列目录放在同一个上层目录里。
 
+当前版本已经把“源目录扫描与帧索引”单独缓存到 `data.index_cache_dir`，默认是 `.cache/stage1_data`。第一次扫描大数据集仍然会慢，但后续重复启动训练时会优先复用缓存，不再每次都重新做完整索引。
+
 一个通用目录示例：
 
 ```text
@@ -153,6 +155,7 @@ data:
 - `data.subset_seed`：子集抽样种子。
 - `data.source_fraction`：抽多少比例的序列。
 - `data.sample_fraction`：抽多少比例的 GOP 样本。
+- `data.index_cache_dir`：数据索引缓存目录；设为 `null` 可以关闭缓存。
 - `data.gop_size`：每个样本有多少帧。
 - `data.frame_height` 和 `data.frame_width`：统一 resize 后送入模型的分辨率。
 

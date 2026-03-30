@@ -33,6 +33,7 @@ class Stage1DataConfig:
     train_source_path: str | None = None
     val_source_path: str | None = None
     recursive: bool = True
+    index_cache_dir: str | None = ".cache/stage1_data"
     subset_seed: int = 42
     source_fraction: float = 1.0
     sample_fraction: float = 1.0
