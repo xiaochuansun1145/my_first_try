@@ -81,7 +81,7 @@ class RTDetrBaseline:
     def predict(self, inputs: dict[str, torch.Tensor]):
         return self.model(**inputs, return_dict=True)
 
-    @torch.inference_mode()
+    @torch.no_grad()
     def extract_encoder_feature_bundle(self, inputs: dict[str, torch.Tensor]) -> EncoderFeatureBundle:
         core_model = self.model.model
         pixel_values = inputs["pixel_values"]
