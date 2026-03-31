@@ -45,6 +45,7 @@ python scripts/plot_stage1_metrics.py --metrics outputs/mdvsc_stage1/metrics.jso
 - feature_loss
 - recon_l1_loss
 - recon_mse_loss
+- recon_ssim_loss
 
 ### 1. total_loss
 
@@ -66,20 +67,28 @@ python scripts/plot_stage1_metrics.py --metrics outputs/mdvsc_stage1/metrics.jso
 
 如果 feature_loss 不下降，后面的重建和检测一致性通常也很难稳定。
 
-### 3. recon_l1_loss 和 recon_mse_loss
+### 3. recon_l1_loss、recon_mse_loss 和 recon_ssim_loss
 
-这两条曲线衡量帧级重建质量。
+这三条曲线共同衡量帧级重建质量。
 
 - recon_l1_loss 更偏向整体结构和轮廓误差；
 - recon_mse_loss 对局部像素差更敏感。
+- recon_ssim_loss 更偏向结构相似性，通常和“肉眼看起来是否更像”更接近。
 
-正常情况下，这两条曲线应该与 feature_loss 一起下降，但下降速度不一定一致。
+正常情况下，这三条曲线应该与 feature_loss 一起下降，但下降速度不一定一致。
 
 如果 feature_loss 已经下降，而重建损失下降很慢，通常意味着：
 
 - 重建头容量还不够；
 - 恢复后的特征虽然接近 teacher，但对 RGB 还原还不够友好；
 - 数据分辨率过高，导致重建头学习困难。
+
+如果你的训练日志里已经包含 `phase` 字段，图上还会出现一条阶段切换竖线。它表示训练从“只训练 reconstruction head”切换到了“MDVSC + reconstruction head 联合训练”。
+
+一个常见现象是：
+
+- 在 reconstruction pretrain 阶段，recon_l1、recon_mse、recon_ssim 会下降较快；
+- 切到 joint training 阶段后，feature_loss 和 detection consistency 才开始真正发挥作用。
 
 ## 三、detection_consistency.png 怎么看
 
@@ -183,8 +192,9 @@ python scripts/plot_stage1_metrics.py --metrics outputs/mdvsc_stage1/metrics.jso
 推荐按下面顺序理解和查看图：
 
 1. 先看 loss_overview.png，确认训练是否在正常收敛。
-2. 再看 detection_consistency.png，确认恢复特征是否还保有检测语义。
-3. 最后看 mask_activity.png，确认当前实验到底是不是在做稀疏传输训练。
+2. 再看阶段切换线前后 recon_ssim_loss 的变化，判断 reconstruction head 预训练是否有意义。
+3. 再看 detection_consistency.png，确认恢复特征是否还保有检测语义。
+4. 最后看 mask_activity.png，确认当前实验到底是不是在做稀疏传输训练。
 
 如果你希望下一步做论文式展示，那么建议优先再补三类图：
 

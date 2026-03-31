@@ -48,6 +48,17 @@ def _series(rows: list[dict], split: str, key: str) -> list[float | None]:
     return values
 
 
+def _phase_boundaries(rows: list[dict]) -> list[tuple[int, str]]:
+    boundaries: list[tuple[int, str]] = []
+    previous_phase = None
+    for row in rows:
+        phase = row.get("phase")
+        if previous_phase is not None and phase != previous_phase:
+            boundaries.append((int(row["epoch"]), str(phase)))
+        previous_phase = phase
+    return boundaries
+
+
 def main() -> None:
     args = parse_args()
     metrics_path = Path(args.metrics)
@@ -57,6 +68,7 @@ def main() -> None:
     rows = _load_metrics(metrics_path)
     epochs = [row["epoch"] for row in rows]
     learning_rates = [row["lr"] for row in rows]
+    phase_boundaries = _phase_boundaries(rows)
 
     import matplotlib.pyplot as plt
 
@@ -71,12 +83,17 @@ def main() -> None:
         ax.set_ylabel(ylabel)
         ax.grid(True, alpha=0.3)
         ax.legend()
+        for boundary_epoch, phase in phase_boundaries:
+            ax.axvline(boundary_epoch - 0.5, color="gray", linestyle="--", alpha=0.4)
+            ax.text(boundary_epoch - 0.45, ax.get_ylim()[1], phase, rotation=90, va="top", ha="left", fontsize=8)
 
-    figure, axes = plt.subplots(2, 2, figsize=(14, 10))
+    figure, axes = plt.subplots(2, 3, figsize=(18, 10))
     plot_train_val(axes[0, 0], "total_loss", "Total Loss", "loss")
     plot_train_val(axes[0, 1], "feature_loss", "Feature Reconstruction Loss", "loss")
+    plot_train_val(axes[0, 2], "recon_ssim_loss", "Frame Reconstruction SSIM Loss", "loss")
     plot_train_val(axes[1, 0], "recon_l1_loss", "Frame Reconstruction L1", "loss")
     plot_train_val(axes[1, 1], "recon_mse_loss", "Frame Reconstruction MSE", "loss")
+    axes[1, 2].axis("off")
     figure.tight_layout()
     figure.savefig(output_dir / "loss_overview.png", dpi=200)
     plt.close(figure)
@@ -101,6 +118,9 @@ def main() -> None:
     axis.set_xlabel("Epoch")
     axis.set_ylabel("lr")
     axis.grid(True, alpha=0.3)
+    for boundary_epoch, phase in phase_boundaries:
+        axis.axvline(boundary_epoch - 0.5, color="gray", linestyle="--", alpha=0.4)
+        axis.text(boundary_epoch - 0.45, axis.get_ylim()[1], phase, rotation=90, va="top", ha="left", fontsize=8)
     figure.tight_layout()
     figure.savefig(output_dir / "learning_rate.png", dpi=200)
     plt.close(figure)
@@ -116,6 +136,7 @@ def main() -> None:
                     "mask_activity.png",
                     "learning_rate.png",
                 ],
+                    "phase_boundaries": phase_boundaries,
             },
             indent=2,
             ensure_ascii=False,

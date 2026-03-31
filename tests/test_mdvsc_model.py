@@ -8,6 +8,25 @@ from src.semantic_rtdetr.semantic_comm.mdvsc import ProjectMDVSC
 
 
 class ProjectMDVSCTest(unittest.TestCase):
+    def test_reconstruction_head_direct_path_returns_expected_shape(self) -> None:
+        model = ProjectMDVSC(
+            feature_channels=[16, 16, 16],
+            latent_dims=[8, 8, 8],
+            common_keep_ratios=[0.5, 0.5, 0.5],
+            individual_keep_ratios=[0.25, 0.25, 0.25],
+            block_sizes=[4, 2, 1],
+        )
+        feature_sequences = [
+            torch.randn(2, 3, 16, 8, 8),
+            torch.randn(2, 3, 16, 4, 4),
+            torch.randn(2, 3, 16, 2, 2),
+        ]
+
+        outputs = model.reconstruct_from_feature_sequences(feature_sequences, output_size=(64, 64))
+
+        self.assertEqual(outputs.reconstructed_frames.shape, (2, 3, 3, 64, 64))
+        self.assertEqual(outputs.restored_sequences[0].shape, feature_sequences[0].shape)
+
     def test_forward_preserves_multiscale_shapes(self) -> None:
         model = ProjectMDVSC(
             feature_channels=[16, 16, 16],

@@ -20,6 +20,9 @@ from src.semantic_rtdetr.semantic_comm.mdvsc import MDVSCOutput, ProjectMDVSC
 from src.semantic_rtdetr.training.stage1_config import MDVSCStage1TrainConfig
 from src.semantic_rtdetr.training.stage1_data import build_train_val_datasets
 
+PHASE_RECONSTRUCTION_PRETRAIN = "reconstruction_pretrain"
+PHASE_JOINT_TRAINING = "joint_training"
+
 
 def _dataset_summary(dataset) -> dict[str, Any]:
     base_dataset = dataset.dataset if isinstance(dataset, Subset) else dataset
@@ -57,6 +60,48 @@ def _sequences_to_bundle(sequences: list[torch.Tensor], reference: EncoderFeatur
     )
 
 
+def _gaussian_kernel(kernel_size: int, sigma: float, channels: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
+    coordinates = torch.arange(kernel_size, device=device, dtype=dtype) - kernel_size // 2
+    kernel_1d = torch.exp(-(coordinates.pow(2)) / (2 * sigma * sigma))
+    kernel_1d = kernel_1d / kernel_1d.sum()
+    kernel_2d = torch.outer(kernel_1d, kernel_1d)
+    return kernel_2d.expand(channels, 1, kernel_size, kernel_size).contiguous()
+
+
+def _ssim_loss(prediction: torch.Tensor, target: torch.Tensor, kernel_size: int = 11, sigma: float = 1.5) -> torch.Tensor:
+    if prediction.shape != target.shape:
+        raise ValueError("prediction and target must have the same shape for SSIM")
+
+    batch_size, time_steps, channels, height, width = prediction.shape
+    prediction_2d = prediction.view(batch_size * time_steps, channels, height, width)
+    target_2d = target.view(batch_size * time_steps, channels, height, width)
+    kernel = _gaussian_kernel(kernel_size, sigma, channels, prediction.device, prediction.dtype)
+    padding = kernel_size // 2
+
+    mu_prediction = F.conv2d(prediction_2d, kernel, padding=padding, groups=channels)
+    mu_target = F.conv2d(target_2d, kernel, padding=padding, groups=channels)
+
+    mu_prediction_sq = mu_prediction.pow(2)
+    mu_target_sq = mu_target.pow(2)
+    mu_prediction_target = mu_prediction * mu_target
+
+    sigma_prediction_sq = F.conv2d(prediction_2d * prediction_2d, kernel, padding=padding, groups=channels) - mu_prediction_sq
+    sigma_target_sq = F.conv2d(target_2d * target_2d, kernel, padding=padding, groups=channels) - mu_target_sq
+    sigma_prediction_target = F.conv2d(
+        prediction_2d * target_2d,
+        kernel,
+        padding=padding,
+        groups=channels,
+    ) - mu_prediction_target
+
+    c1 = 0.01**2
+    c2 = 0.03**2
+    ssim_numerator = (2 * mu_prediction_target + c1) * (2 * sigma_prediction_target + c2)
+    ssim_denominator = (mu_prediction_sq + mu_target_sq + c1) * (sigma_prediction_sq + sigma_target_sq + c2)
+    ssim_map = ssim_numerator / ssim_denominator.clamp_min(1e-6)
+    return 1.0 - ssim_map.mean()
+
+
 class Stage1Trainer:
     def __init__(self, config: MDVSCStage1TrainConfig):
         self.config = config
@@ -83,12 +128,7 @@ class Stage1Trainer:
             individual_keep_ratios=config.mdvsc.individual_keep_ratios,
             block_sizes=config.mdvsc.block_sizes,
         ).to(self.baseline.device)
-        self.optimizer = torch.optim.AdamW(
-            self.model.parameters(),
-            lr=config.optimization.lr,
-            weight_decay=config.optimization.weight_decay,
-        )
-        self.scheduler = self._build_scheduler()
+        self.optimizer, self.scheduler = self._build_phase_optimizer(PHASE_JOINT_TRAINING)
 
         print("[stage1] Building train/val datasets", flush=True)
         train_dataset, val_dataset = build_train_val_datasets(config.data, seed=config.optimization.seed)
@@ -123,7 +163,7 @@ class Stage1Trainer:
                 num_workers=config.optimization.num_workers,
                 pin_memory=pin_memory,
             )
-            print("[stage1] DataLoader initialization complete", flush=True)
+        print("[stage1] DataLoader initialization complete", flush=True)
 
     def run(self) -> dict[str, Any]:
         metrics_path = self.output_dir / "metrics.jsonl"
@@ -134,39 +174,71 @@ class Stage1Trainer:
 
         best_val_loss: float | None = None
         last_summary: dict[str, Any] | None = None
-        for epoch in range(1, self.config.optimization.epochs + 1):
-            print(f"[stage1] Starting epoch {epoch}/{self.config.optimization.epochs}", flush=True)
-            train_metrics = self._run_epoch(self.train_loader, training=True, epoch=epoch)
-            val_metrics = None
-            if self.val_loader is not None:
-                val_metrics = self._run_epoch(self.val_loader, training=False, epoch=epoch)
+        global_epoch = 0
+        phase_sequence: list[tuple[str, int]] = []
+        if self.config.optimization.reconstruction_pretrain_epochs > 0:
+            phase_sequence.append((PHASE_RECONSTRUCTION_PRETRAIN, self.config.optimization.reconstruction_pretrain_epochs))
+        phase_sequence.append((PHASE_JOINT_TRAINING, self.config.optimization.epochs))
 
-            if self.scheduler is not None:
-                self.scheduler.step()
+        for phase_name, phase_epochs in phase_sequence:
+            self.optimizer, self.scheduler = self._build_phase_optimizer(phase_name)
+            if phase_name == PHASE_RECONSTRUCTION_PRETRAIN:
+                print("[stage1] Starting reconstruction-head pretraining with frozen RT-DETR teacher", flush=True)
+            else:
+                print("[stage1] Starting joint MDVSC + reconstruction training", flush=True)
 
-            summary = {
-                "epoch": epoch,
-                "train": train_metrics,
-                "val": val_metrics,
-                "lr": float(self.optimizer.param_groups[0]["lr"]),
-            }
-            with metrics_path.open("a", encoding="utf-8") as handle:
-                handle.write(json.dumps(summary, ensure_ascii=False) + "\n")
+            for phase_epoch in range(1, phase_epochs + 1):
+                global_epoch += 1
+                print(
+                    f"[stage1] Starting {phase_name} epoch {phase_epoch}/{phase_epochs} "
+                    f"(global {global_epoch})",
+                    flush=True,
+                )
+                train_metrics = self._run_epoch(
+                    self.train_loader,
+                    training=True,
+                    epoch=global_epoch,
+                    phase=phase_name,
+                )
+                val_metrics = None
+                if self.val_loader is not None:
+                    val_metrics = self._run_epoch(
+                        self.val_loader,
+                        training=False,
+                        epoch=global_epoch,
+                        phase=phase_name,
+                    )
 
-            current_val = val_metrics["total_loss"] if val_metrics is not None else train_metrics["total_loss"]
-            if best_val_loss is None or current_val < best_val_loss:
-                best_val_loss = current_val
-                self._save_checkpoint("best.pt", epoch, summary)
+                if self.scheduler is not None:
+                    self.scheduler.step()
 
-            if epoch % self.config.optimization.save_every_epochs == 0:
-                self._save_checkpoint(f"epoch_{epoch:03d}.pt", epoch, summary)
-            self._save_checkpoint("latest.pt", epoch, summary)
-            last_summary = summary
+                summary = {
+                    "epoch": global_epoch,
+                    "phase": phase_name,
+                    "phase_epoch": phase_epoch,
+                    "train": train_metrics,
+                    "val": val_metrics,
+                    "lr": float(self.optimizer.param_groups[0]["lr"]),
+                }
+                with metrics_path.open("a", encoding="utf-8") as handle:
+                    handle.write(json.dumps(summary, ensure_ascii=False) + "\n")
+
+                current_val = val_metrics["total_loss"] if val_metrics is not None else train_metrics["total_loss"]
+                if best_val_loss is None or current_val < best_val_loss:
+                    best_val_loss = current_val
+                    self._save_checkpoint("best.pt", global_epoch, summary)
+
+                if global_epoch % self.config.optimization.save_every_epochs == 0:
+                    self._save_checkpoint(f"epoch_{global_epoch:03d}.pt", global_epoch, summary)
+                self._save_checkpoint("latest.pt", global_epoch, summary)
+                last_summary = summary
 
         final_summary = {
             "output_dir": str(self.output_dir),
             "best_val_loss": best_val_loss,
             "dataset": self.dataset_info,
+            "reconstruction_pretrain_epochs": self.config.optimization.reconstruction_pretrain_epochs,
+            "joint_training_epochs": self.config.optimization.epochs,
             "last_epoch": last_summary,
         }
         (self.output_dir / "final_summary.json").write_text(
@@ -175,12 +247,12 @@ class Stage1Trainer:
         )
         return final_summary
 
-    def _run_epoch(self, dataloader: DataLoader, training: bool, epoch: int) -> dict[str, float]:
+    def _run_epoch(self, dataloader: DataLoader, training: bool, epoch: int, phase: str) -> dict[str, float]:
         self.model.train(training)
         metric_sums: defaultdict[str, float] = defaultdict(float)
         max_steps = self.config.optimization.max_steps_per_epoch
         steps = 0
-        progress = tqdm(dataloader, desc=f"epoch {epoch} {'train' if training else 'val'}", leave=False)
+        progress = tqdm(dataloader, desc=f"epoch {epoch} {phase} {'train' if training else 'val'}", leave=False)
 
         for batch_index, frames in enumerate(progress, start=1):
             if max_steps is not None and batch_index > max_steps:
@@ -193,19 +265,29 @@ class Stage1Trainer:
             with torch.no_grad():
                 detector_inputs = self.baseline.prepare_frame_tensor_batch(flat_frames)
                 teacher_bundle = self.baseline.extract_encoder_feature_bundle(detector_inputs)
-                teacher_outputs = self.baseline.predict(detector_inputs)
+                teacher_outputs = None
+                if phase == PHASE_JOINT_TRAINING and (
+                    self.config.loss.detection_logit_weight > 0.0 or self.config.loss.detection_box_weight > 0.0
+                ):
+                    teacher_outputs = self.baseline.predict(detector_inputs)
 
             if training:
                 self.optimizer.zero_grad(set_to_none=True)
 
             target_sequences = _bundle_to_sequences(teacher_bundle, batch_size, time_steps)
-            model_outputs = self.model(
-                target_sequences,
-                output_size=(height, width),
-                apply_masks=self.config.mdvsc.apply_masks,
-                channel_mode=self.config.mdvsc.channel_mode,
-                snr_db=self.config.mdvsc.snr_db,
-            )
+            if phase == PHASE_RECONSTRUCTION_PRETRAIN:
+                model_outputs = self.model.reconstruct_from_feature_sequences(
+                    target_sequences,
+                    output_size=(height, width),
+                )
+            else:
+                model_outputs = self.model(
+                    target_sequences,
+                    output_size=(height, width),
+                    apply_masks=self.config.mdvsc.apply_masks,
+                    channel_mode=self.config.mdvsc.channel_mode,
+                    snr_db=self.config.mdvsc.snr_db,
+                )
             loss_dict = self._compute_losses(
                 frames=frames,
                 target_sequences=target_sequences,
@@ -213,6 +295,7 @@ class Stage1Trainer:
                 detector_inputs=detector_inputs,
                 teacher_bundle=teacher_bundle,
                 teacher_outputs=teacher_outputs,
+                phase=phase,
             )
 
             if training:
@@ -252,6 +335,7 @@ class Stage1Trainer:
             "feature_loss": metric_sums["feature"] / steps,
             "recon_l1_loss": metric_sums["recon_l1"] / steps,
             "recon_mse_loss": metric_sums["recon_mse"] / steps,
+            "recon_ssim_loss": metric_sums["recon_ssim"] / steps,
             "detection_logit_loss": metric_sums["detection_logit"] / steps,
             "detection_box_loss": metric_sums["detection_box"] / steps,
             "common_active_ratio": metric_sums["common_active_ratio"] / steps,
@@ -266,22 +350,29 @@ class Stage1Trainer:
         detector_inputs: dict[str, torch.Tensor],
         teacher_bundle: EncoderFeatureBundle,
         teacher_outputs,
+        phase: str,
     ) -> dict[str, torch.Tensor]:
         feature_loss = torch.zeros((), device=frames.device)
-        for level_weight, restored_sequence, target_sequence in zip(
-            self.config.loss.level_loss_weights,
-            model_outputs.restored_sequences,
-            target_sequences,
-        ):
-            feature_loss = feature_loss + float(level_weight) * F.smooth_l1_loss(restored_sequence, target_sequence)
+        if phase == PHASE_JOINT_TRAINING:
+            for level_weight, restored_sequence, target_sequence in zip(
+                self.config.loss.level_loss_weights,
+                model_outputs.restored_sequences,
+                target_sequences,
+            ):
+                feature_loss = feature_loss + float(level_weight) * F.smooth_l1_loss(restored_sequence, target_sequence)
 
         reconstructed_frames = model_outputs.reconstructed_frames
         recon_l1_loss = F.l1_loss(reconstructed_frames, frames)
         recon_mse_loss = F.mse_loss(reconstructed_frames, frames)
+        recon_ssim_loss = _ssim_loss(reconstructed_frames, frames)
 
         detection_logit_loss = torch.zeros((), device=frames.device)
         detection_box_loss = torch.zeros((), device=frames.device)
-        if self.config.loss.detection_logit_weight > 0.0 or self.config.loss.detection_box_weight > 0.0:
+        if (
+            phase == PHASE_JOINT_TRAINING
+            and teacher_outputs is not None
+            and (self.config.loss.detection_logit_weight > 0.0 or self.config.loss.detection_box_weight > 0.0)
+        ):
             student_bundle = _sequences_to_bundle(model_outputs.restored_sequences, teacher_bundle)
             student_outputs = self.baseline.forward_from_encoder_feature_bundle(detector_inputs, student_bundle)
             detection_logit_loss = F.mse_loss(student_outputs.logits, teacher_outputs.logits.detach())
@@ -291,6 +382,7 @@ class Stage1Trainer:
             self.config.loss.feature_loss_weight * feature_loss
             + self.config.loss.recon_l1_weight * recon_l1_loss
             + self.config.loss.recon_mse_weight * recon_mse_loss
+            + self.config.loss.recon_ssim_weight * recon_ssim_loss
             + self.config.loss.detection_logit_weight * detection_logit_loss
             + self.config.loss.detection_box_weight * detection_box_loss
         )
@@ -300,9 +392,29 @@ class Stage1Trainer:
             "feature": feature_loss,
             "recon_l1": recon_l1_loss,
             "recon_mse": recon_mse_loss,
+            "recon_ssim": recon_ssim_loss,
             "detection_logit": detection_logit_loss,
             "detection_box": detection_box_loss,
         }
+
+    def _build_phase_optimizer(self, phase: str):
+        if phase == PHASE_RECONSTRUCTION_PRETRAIN:
+            parameters = self.model.reconstruction_head.parameters()
+            lr = self.config.optimization.reconstruction_pretrain_lr
+        else:
+            parameters = self.model.parameters()
+            lr = self.config.optimization.lr
+
+        optimizer = torch.optim.AdamW(
+            parameters,
+            lr=lr,
+            weight_decay=self.config.optimization.weight_decay,
+        )
+        if phase == PHASE_RECONSTRUCTION_PRETRAIN:
+            scheduler = None
+        else:
+            scheduler = self._build_scheduler(optimizer=optimizer, epochs=self.config.optimization.epochs)
+        return optimizer, scheduler
 
     def _save_checkpoint(self, file_name: str, epoch: int, summary: dict[str, Any]) -> None:
         checkpoint = {
@@ -315,32 +427,32 @@ class Stage1Trainer:
         }
         torch.save(checkpoint, self.output_dir / file_name)
 
-    def _build_scheduler(self):
+    def _build_scheduler(self, optimizer: torch.optim.Optimizer, epochs: int):
         scheduler_type = self.config.optimization.scheduler.lower()
         if scheduler_type == "constant":
             return None
         if scheduler_type != "cosine":
             raise ValueError(f"Unsupported scheduler type: {self.config.optimization.scheduler}")
 
-        total_epochs = max(self.config.optimization.epochs, 1)
+        total_epochs = max(epochs, 1)
         warmup_epochs = max(0, min(self.config.optimization.warmup_epochs, total_epochs - 1))
-        eta_min = self.config.optimization.lr * self.config.optimization.min_lr_ratio
+        eta_min = float(optimizer.param_groups[0]["lr"]) * self.config.optimization.min_lr_ratio
 
         if warmup_epochs == 0:
-            return CosineAnnealingLR(self.optimizer, T_max=total_epochs, eta_min=eta_min)
+            return CosineAnnealingLR(optimizer, T_max=total_epochs, eta_min=eta_min)
 
         warmup = LinearLR(
-            self.optimizer,
+            optimizer,
             start_factor=self.config.optimization.warmup_start_factor,
             end_factor=1.0,
             total_iters=warmup_epochs,
         )
         cosine = CosineAnnealingLR(
-            self.optimizer,
+            optimizer,
             T_max=max(total_epochs - warmup_epochs, 1),
             eta_min=eta_min,
         )
-        return SequentialLR(self.optimizer, schedulers=[warmup, cosine], milestones=[warmup_epochs])
+        return SequentialLR(optimizer, schedulers=[warmup, cosine], milestones=[warmup_epochs])
 
     def _should_save_visualizations(self, epoch: int) -> bool:
         if not self.config.output.save_visualizations:

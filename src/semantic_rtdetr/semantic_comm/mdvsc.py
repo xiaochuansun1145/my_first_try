@@ -303,6 +303,63 @@ class ProjectMDVSC(nn.Module):
         )
         self.reconstruction_head = ReconstructionHead(self.feature_channels)
 
+    def reconstruct_from_feature_sequences(
+        self,
+        feature_sequences: list[torch.Tensor],
+        output_size: tuple[int, int],
+    ) -> MDVSCOutput:
+        if len(feature_sequences) != len(self.level_modules):
+            raise ValueError("feature_sequences must match the configured number of levels")
+
+        time_steps = feature_sequences[0].shape[1]
+        reconstructed_frames = torch.stack(
+            [
+                self.reconstruction_head(
+                    [level_sequence[:, frame_index] for level_sequence in feature_sequences],
+                    output_size=output_size,
+                )
+                for frame_index in range(time_steps)
+            ],
+            dim=1,
+        )
+
+        level_stats: list[LevelTransmissionStats] = []
+        common_masks: list[torch.Tensor] = []
+        individual_masks: list[torch.Tensor] = []
+        for level_index, feature_sequence in enumerate(feature_sequences):
+            batch_size, time_steps, _channels, height, width = feature_sequence.shape
+            common_masks.append(
+                torch.ones(
+                    (batch_size, self.latent_dims[level_index], 1, 1),
+                    device=feature_sequence.device,
+                    dtype=feature_sequence.dtype,
+                )
+            )
+            individual_masks.append(
+                torch.ones(
+                    (batch_size, time_steps, 1, height, width),
+                    device=feature_sequence.device,
+                    dtype=feature_sequence.dtype,
+                )
+            )
+            level_stats.append(
+                LevelTransmissionStats(
+                    level=level_index,
+                    latent_dim=self.latent_dims[level_index],
+                    block_size=self.block_sizes[level_index],
+                    common_active_ratio=1.0,
+                    individual_active_ratio=1.0,
+                )
+            )
+
+        return MDVSCOutput(
+            restored_sequences=list(feature_sequences),
+            reconstructed_frames=reconstructed_frames,
+            level_stats=level_stats,
+            common_masks=common_masks,
+            individual_masks=individual_masks,
+        )
+
     def forward(
         self,
         feature_sequences: list[torch.Tensor],
@@ -331,20 +388,10 @@ class ProjectMDVSC(nn.Module):
             common_masks.append(common_mask)
             individual_masks.append(individual_mask)
 
-        time_steps = restored_sequences[0].shape[1]
-        reconstructed_frames = torch.stack(
-            [
-                self.reconstruction_head(
-                    [level_sequence[:, frame_index] for level_sequence in restored_sequences],
-                    output_size=output_size,
-                )
-                for frame_index in range(time_steps)
-            ],
-            dim=1,
-        )
+        direct_reconstruction = self.reconstruct_from_feature_sequences(restored_sequences, output_size=output_size)
         return MDVSCOutput(
             restored_sequences=restored_sequences,
-            reconstructed_frames=reconstructed_frames,
+            reconstructed_frames=direct_reconstruction.reconstructed_frames,
             level_stats=level_stats,
             common_masks=common_masks,
             individual_masks=individual_masks,

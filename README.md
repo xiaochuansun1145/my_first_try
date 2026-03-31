@@ -86,6 +86,8 @@ python scripts/run_semcom_pipeline.py --config configs/rtdetr_semcom_mvp.yaml --
 python scripts/train_mdvsc_stage1.py --config configs/mdvsc_stage1.yaml --data /absolute/path/to/data
 ```
 
+当前默认训练路线已经改成两段式：先用冻结的 RT-DETR teacher 特征单独预训练 reconstruction head，再接入 MDVSC 做联合训练。重建项除了 L1 和 MSE，也默认加入了 SSIM loss。
+
 详细步骤见 [docs/stage1_training_manual.md](docs/stage1_training_manual.md)。
 
 第一阶段通信接口切片定义在 [docs/feature_interface.md](docs/feature_interface.md)。

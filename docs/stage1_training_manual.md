@@ -10,6 +10,13 @@
 
 当前仓库默认已经把 mask 打开，也就是公共分支和个体分支都会执行结构化筛选；但这仍然属于“先把结构训稳”的阶段，不是最终版的完整率失真联合训练。
 
+当前默认训练流程已经升级为两段式：
+
+- 先冻结 RT-DETR teacher，只训练 reconstruction head，让它先学会把 teacher 特征还原成图像；
+- 再在这个基础上接入 MDVSC，做特征恢复、重建和检测一致性的联合训练。
+
+这样做的目的，是避免 reconstruction head 和 MDVSC 同时从随机初始化开始、彼此拖累收敛。
+
 ## 一、训练前需要准备什么
 
 训练前必须满足两个前提：
@@ -162,6 +169,8 @@ data:
 ### 训练相关
 
 - `optimization.batch_size`：批大小。
+- `optimization.reconstruction_pretrain_epochs`：重建头预训练轮数。
+- `optimization.reconstruction_pretrain_lr`：重建头预训练学习率。
 - `optimization.epochs`：训练轮数。
 - `optimization.lr`：学习率。
 - `optimization.scheduler`：当前支持 `constant` 和 `cosine`。
@@ -172,11 +181,19 @@ data:
 
 - `detector.local_path`：RT-DETR 本地权重目录，默认是 `pretrained/rtdetr_r50vd`。
 - `detector.cache_dir`：可选的 Hugging Face 缓存目录。
+- 当前第一阶段默认保持 RT-DETR 冻结，包括 reconstruction head 预训练阶段也不解冻 teacher。
 - `mdvsc.apply_masks`：当前建议保持 `true`。
 - `mdvsc.channel_mode`：第一阶段建议先用 `identity`。
 - `mdvsc.latent_dims`：当前默认是 48 / 64 / 96。
 - `mdvsc.common_keep_ratios`：当前默认是 0.5 / 0.625 / 0.75。
 - `mdvsc.individual_keep_ratios`：当前默认是 0.125 / 0.1875 / 0.25。
+
+### 损失相关
+
+- `loss.recon_l1_weight`：像素 L1 重建权重。
+- `loss.recon_mse_weight`：像素 MSE 重建权重。
+- `loss.recon_ssim_weight`：SSIM 重建权重。
+- reconstruction head 预训练阶段默认只使用重建相关损失，不使用 feature loss 和 detection consistency loss。
 
 ## 七、推荐起步配置
 
@@ -196,6 +213,21 @@ mdvsc:
 ```
 
 这就是当前最推荐的“先取 20% 数据、mask 打开、先做结构逼近”的起步方式。
+
+对应的优化默认值是：
+
+```yaml
+optimization:
+  reconstruction_pretrain_epochs: 3
+  reconstruction_pretrain_lr: 3.0e-4
+  epochs: 10
+  lr: 1.0e-4
+
+loss:
+  recon_l1_weight: 1.0
+  recon_mse_weight: 0.25
+  recon_ssim_weight: 0.25
+```
 
 ## 八、怎么启动训练
 
@@ -248,6 +280,8 @@ python scripts/train_mdvsc_stage1.py \
 
 这张图主要看重建头是否学到了合理的帧级恢复能力。
 
+在 reconstruction head 预训练阶段，这张图最直接；如果这个阶段结束时仍然明显模糊，优先怀疑 reconstruction head 容量或重建损失，而不是 MDVSC。
+
 ### 2. feature_maps 图
 
 `epoch_XXX_feature_maps.png` 里每个 level 会显示三张图：
@@ -286,6 +320,8 @@ python scripts/plot_stage1_metrics.py --metrics outputs/mdvsc_stage1_imagenet_vi
 - `mask_activity.png`
 - `learning_rate.png`
 
+如果 `metrics.jsonl` 里包含 `phase` 字段，绘图脚本会在图中用竖虚线标出从 reconstruction head 预训练切换到联合训练的位置。
+
 如何解读这些图，见 `docs/training_visualization_guide.md`。
 
 ## 十二、训练时建议重点盯哪些指标
@@ -293,14 +329,16 @@ python scripts/plot_stage1_metrics.py --metrics outputs/mdvsc_stage1_imagenet_vi
 建议优先看：
 
 1. `feature_loss`
-2. `detection_logit_loss`
-3. `detection_box_loss`
-4. `common_active_ratio`
-5. `individual_active_ratio`
+2. `recon_ssim_loss`
+3. `detection_logit_loss`
+4. `detection_box_loss`
+5. `common_active_ratio`
+6. `individual_active_ratio`
 
 当前阶段最理想的现象是：
 
 - `feature_loss` 逐步下降；
+- `recon_ssim_loss` 逐步下降；
 - 检测一致性损失也逐步下降；
 - mask 激活比例相对稳定，而不是严重抖动；
 - `epoch_XXX_masks.png` 看起来有明显结构，不是全白或全黑。

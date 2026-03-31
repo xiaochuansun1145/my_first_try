@@ -64,6 +64,8 @@ class Stage1MDVSCConfig:
 class Stage1OptimizationConfig:
     batch_size: int = 1
     num_workers: int = 4
+    reconstruction_pretrain_epochs: int = 3
+    reconstruction_pretrain_lr: float = 3e-4
     epochs: int = 10
     lr: float = 1e-4
     weight_decay: float = 1e-4
@@ -83,6 +85,7 @@ class Stage1LossConfig:
     feature_loss_weight: float = 1.0
     recon_l1_weight: float = 1.0
     recon_mse_weight: float = 0.25
+    recon_ssim_weight: float = 0.25
     detection_logit_weight: float = 0.05
     detection_box_weight: float = 0.05
     level_loss_weights: list[float] = field(default_factory=lambda: [1.0, 1.0, 1.0])
@@ -139,6 +142,7 @@ def load_stage1_config(config_path: str | Path) -> MDVSCStage1TrainConfig:
             feature_loss_weight=float(loss_data.get("feature_loss_weight", 1.0)),
             recon_l1_weight=float(loss_data.get("recon_l1_weight", 1.0)),
             recon_mse_weight=float(loss_data.get("recon_mse_weight", 0.25)),
+            recon_ssim_weight=float(loss_data.get("recon_ssim_weight", 0.25)),
             detection_logit_weight=float(loss_data.get("detection_logit_weight", 0.05)),
             detection_box_weight=float(loss_data.get("detection_box_weight", 0.05)),
         ),
