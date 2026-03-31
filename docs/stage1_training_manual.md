@@ -10,12 +10,13 @@
 
 当前仓库默认已经把 mask 打开，也就是公共分支和个体分支都会执行结构化筛选；但这仍然属于“先把结构训稳”的阶段，不是最终版的完整率失真联合训练。
 
-当前默认训练流程已经升级为两段式：
+当前默认训练流程已经升级为三段式：
 
 - 先冻结 RT-DETR teacher，只训练 reconstruction head，让它先学会把 teacher 特征还原成图像；
-- 再在这个基础上接入 MDVSC，做特征恢复、重建和检测一致性的联合训练。
+- 再冻结 reconstruction head，只训练 MDVSC，让它先适配一个稳定的重建解码器；
+- 最后再做 MDVSC + reconstruction head 的联合训练。
 
-这样做的目的，是避免 reconstruction head 和 MDVSC 同时从随机初始化开始、彼此拖累收敛。
+这样做的目的，是避免 reconstruction head 和 MDVSC 同时从随机初始化开始、彼此拖累收敛，同时减少在 MDVSC 刚接入时重建头被不稳定输入分布带偏的风险。
 
 ## 一、训练前需要准备什么
 
@@ -171,6 +172,8 @@ data:
 - `optimization.batch_size`：批大小。
 - `optimization.reconstruction_pretrain_epochs`：重建头预训练轮数。
 - `optimization.reconstruction_pretrain_lr`：重建头预训练学习率。
+- `optimization.mdvsc_bootstrap_epochs`：冻结重建头时，单独训练 MDVSC 的轮数。
+- `optimization.mdvsc_bootstrap_lr`：MDVSC bootstrap 阶段的学习率。
 - `optimization.epochs`：训练轮数。
 - `optimization.lr`：学习率。
 - `optimization.scheduler`：当前支持 `constant` 和 `cosine`。
@@ -181,7 +184,7 @@ data:
 
 - `detector.local_path`：RT-DETR 本地权重目录，默认是 `pretrained/rtdetr_r50vd`。
 - `detector.cache_dir`：可选的 Hugging Face 缓存目录。
-- 当前第一阶段默认保持 RT-DETR 冻结，包括 reconstruction head 预训练阶段也不解冻 teacher。
+- 当前第一阶段默认保持 RT-DETR 冻结，包括 reconstruction head 预训练、MDVSC bootstrap 和联合训练阶段都不解冻 teacher。
 - `mdvsc.apply_masks`：当前建议保持 `true`。
 - `mdvsc.channel_mode`：第一阶段建议先用 `identity`。
 - `mdvsc.latent_dims`：当前默认是 48 / 64 / 96。
@@ -194,6 +197,8 @@ data:
 - `loss.recon_mse_weight`：像素 MSE 重建权重。
 - `loss.recon_ssim_weight`：SSIM 重建权重。
 - reconstruction head 预训练阶段默认只使用重建相关损失，不使用 feature loss 和 detection consistency loss。
+- MDVSC bootstrap 阶段默认使用 feature loss + 重建损失，但仍不打开 detection consistency loss。
+- 只有最后的 joint training 阶段才会把 detection consistency loss 接入总损失。
 
 ## 七、推荐起步配置
 
@@ -220,6 +225,8 @@ mdvsc:
 optimization:
   reconstruction_pretrain_epochs: 3
   reconstruction_pretrain_lr: 3.0e-4
+  mdvsc_bootstrap_epochs: 3
+  mdvsc_bootstrap_lr: 1.0e-4
   epochs: 10
   lr: 1.0e-4
 
@@ -282,6 +289,8 @@ python scripts/train_mdvsc_stage1.py \
 
 在 reconstruction head 预训练阶段，这张图最直接；如果这个阶段结束时仍然明显模糊，优先怀疑 reconstruction head 容量或重建损失，而不是 MDVSC。
 
+如果切到 MDVSC bootstrap 后重建明显变差，通常说明当前压缩后的特征对重建头来说仍然不够友好；如果到 joint training 后又进一步变差，则往往表示检测一致性和重建目标之间还在抢占容量。
+
 ### 2. feature_maps 图
 
 `epoch_XXX_feature_maps.png` 里每个 level 会显示三张图：
@@ -320,7 +329,7 @@ python scripts/plot_stage1_metrics.py --metrics outputs/mdvsc_stage1_imagenet_vi
 - `mask_activity.png`
 - `learning_rate.png`
 
-如果 `metrics.jsonl` 里包含 `phase` 字段，绘图脚本会在图中用竖虚线标出从 reconstruction head 预训练切换到联合训练的位置。
+如果 `metrics.jsonl` 里包含 `phase` 字段，绘图脚本会在图中用竖虚线标出 reconstruction pretrain、MDVSC bootstrap 和 joint training 的阶段切换位置。
 
 如何解读这些图，见 `docs/training_visualization_guide.md`。
 
@@ -342,6 +351,12 @@ python scripts/plot_stage1_metrics.py --metrics outputs/mdvsc_stage1_imagenet_vi
 - 检测一致性损失也逐步下降；
 - mask 激活比例相对稳定，而不是严重抖动；
 - `epoch_XXX_masks.png` 看起来有明显结构，不是全白或全黑。
+
+当前更合理的阶段性现象是：
+
+- reconstruction pretrain 阶段：重建相关损失先明显下降；
+- MDVSC bootstrap 阶段：feature_loss 开始下降，但 detection consistency 仍为 0；
+- joint training 阶段：detection consistency 接入后，总损失短暂上跳，然后重新收敛。
 
 ## 十三、显存不够时怎么调
 

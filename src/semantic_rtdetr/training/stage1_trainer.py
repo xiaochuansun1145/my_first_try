@@ -21,6 +21,7 @@ from src.semantic_rtdetr.training.stage1_config import MDVSCStage1TrainConfig
 from src.semantic_rtdetr.training.stage1_data import build_train_val_datasets
 
 PHASE_RECONSTRUCTION_PRETRAIN = "reconstruction_pretrain"
+PHASE_MDVSC_BOOTSTRAP = "mdvsc_bootstrap"
 PHASE_JOINT_TRAINING = "joint_training"
 
 
@@ -178,12 +179,16 @@ class Stage1Trainer:
         phase_sequence: list[tuple[str, int]] = []
         if self.config.optimization.reconstruction_pretrain_epochs > 0:
             phase_sequence.append((PHASE_RECONSTRUCTION_PRETRAIN, self.config.optimization.reconstruction_pretrain_epochs))
+        if self.config.optimization.mdvsc_bootstrap_epochs > 0:
+            phase_sequence.append((PHASE_MDVSC_BOOTSTRAP, self.config.optimization.mdvsc_bootstrap_epochs))
         phase_sequence.append((PHASE_JOINT_TRAINING, self.config.optimization.epochs))
 
         for phase_name, phase_epochs in phase_sequence:
             self.optimizer, self.scheduler = self._build_phase_optimizer(phase_name)
             if phase_name == PHASE_RECONSTRUCTION_PRETRAIN:
                 print("[stage1] Starting reconstruction-head pretraining with frozen RT-DETR teacher", flush=True)
+            elif phase_name == PHASE_MDVSC_BOOTSTRAP:
+                print("[stage1] Starting MDVSC bootstrap with frozen reconstruction head", flush=True)
             else:
                 print("[stage1] Starting joint MDVSC + reconstruction training", flush=True)
 
@@ -238,6 +243,7 @@ class Stage1Trainer:
             "best_val_loss": best_val_loss,
             "dataset": self.dataset_info,
             "reconstruction_pretrain_epochs": self.config.optimization.reconstruction_pretrain_epochs,
+            "mdvsc_bootstrap_epochs": self.config.optimization.mdvsc_bootstrap_epochs,
             "joint_training_epochs": self.config.optimization.epochs,
             "last_epoch": last_summary,
         }
@@ -300,7 +306,8 @@ class Stage1Trainer:
 
             if training:
                 loss_dict["total"].backward()
-                clip_grad_norm_(self.model.parameters(), self.config.optimization.grad_clip_norm)
+                trainable_parameters = [parameter for parameter in self.model.parameters() if parameter.requires_grad]
+                clip_grad_norm_(trainable_parameters, self.config.optimization.grad_clip_norm)
                 self.optimizer.step()
 
             detached = {name: float(value.detach().item()) for name, value in loss_dict.items()}
@@ -353,7 +360,7 @@ class Stage1Trainer:
         phase: str,
     ) -> dict[str, torch.Tensor]:
         feature_loss = torch.zeros((), device=frames.device)
-        if phase == PHASE_JOINT_TRAINING:
+        if phase in {PHASE_MDVSC_BOOTSTRAP, PHASE_JOINT_TRAINING}:
             for level_weight, restored_sequence, target_sequence in zip(
                 self.config.loss.level_loss_weights,
                 model_outputs.restored_sequences,
@@ -399,10 +406,16 @@ class Stage1Trainer:
 
     def _build_phase_optimizer(self, phase: str):
         if phase == PHASE_RECONSTRUCTION_PRETRAIN:
-            parameters = self.model.reconstruction_head.parameters()
+            self._set_phase_trainability(phase)
+            parameters = [parameter for parameter in self.model.parameters() if parameter.requires_grad]
             lr = self.config.optimization.reconstruction_pretrain_lr
+        elif phase == PHASE_MDVSC_BOOTSTRAP:
+            self._set_phase_trainability(phase)
+            parameters = [parameter for parameter in self.model.parameters() if parameter.requires_grad]
+            lr = self.config.optimization.mdvsc_bootstrap_lr
         else:
-            parameters = self.model.parameters()
+            self._set_phase_trainability(phase)
+            parameters = [parameter for parameter in self.model.parameters() if parameter.requires_grad]
             lr = self.config.optimization.lr
 
         optimizer = torch.optim.AdamW(
@@ -413,8 +426,18 @@ class Stage1Trainer:
         if phase == PHASE_RECONSTRUCTION_PRETRAIN:
             scheduler = None
         else:
-            scheduler = self._build_scheduler(optimizer=optimizer, epochs=self.config.optimization.epochs)
+            phase_epochs = self.config.optimization.mdvsc_bootstrap_epochs if phase == PHASE_MDVSC_BOOTSTRAP else self.config.optimization.epochs
+            scheduler = self._build_scheduler(optimizer=optimizer, epochs=phase_epochs)
         return optimizer, scheduler
+
+    def _set_phase_trainability(self, phase: str) -> None:
+        reconstruction_trainable = phase in {PHASE_RECONSTRUCTION_PRETRAIN, PHASE_JOINT_TRAINING}
+        mdvsc_trainable = phase in {PHASE_MDVSC_BOOTSTRAP, PHASE_JOINT_TRAINING}
+
+        for parameter in self.model.reconstruction_head.parameters():
+            parameter.requires_grad = reconstruction_trainable
+        for parameter in self.model.level_modules.parameters():
+            parameter.requires_grad = mdvsc_trainable
 
     def _save_checkpoint(self, file_name: str, epoch: int, summary: dict[str, Any]) -> None:
         checkpoint = {

@@ -46,6 +46,23 @@ class ResidualBlock(nn.Module):
         return self.activation(outputs + residual)
 
 
+class UpsampleRefineBlock(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int):
+        super().__init__()
+        self.upsample = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels * 4, kernel_size=3, padding=1),
+            nn.GELU(),
+            nn.PixelShuffle(2),
+        )
+        self.refine = nn.Sequential(
+            ResidualBlock(out_channels),
+            ResidualBlock(out_channels),
+        )
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        return self.refine(self.upsample(inputs))
+
+
 class ChannelImportanceGate(nn.Module):
     def __init__(self, keep_ratio: float, temperature: float = 0.1):
         super().__init__()
@@ -221,29 +238,41 @@ class ReconstructionHead(nn.Module):
         self.level2_proj = nn.Sequential(
             nn.Conv2d(feature_channels[2], hidden_channels, kernel_size=1),
             ResidualBlock(hidden_channels),
+            ResidualBlock(hidden_channels),
         )
         self.level1_proj = nn.Sequential(
             nn.Conv2d(feature_channels[1], hidden_channels, kernel_size=1),
             ResidualBlock(hidden_channels),
+            ResidualBlock(hidden_channels),
         )
         self.level0_proj = nn.Sequential(
             nn.Conv2d(feature_channels[0], hidden_channels, kernel_size=1),
+            ResidualBlock(hidden_channels),
             ResidualBlock(hidden_channels),
         )
         self.mid_fusion = nn.Sequential(
             nn.Conv2d(hidden_channels * 2, hidden_channels, kernel_size=3, padding=1),
             nn.GELU(),
             ResidualBlock(hidden_channels),
+            ResidualBlock(hidden_channels),
         )
         self.low_fusion = nn.Sequential(
             nn.Conv2d(hidden_channels * 2, hidden_channels, kernel_size=3, padding=1),
             nn.GELU(),
             ResidualBlock(hidden_channels),
+            ResidualBlock(hidden_channels),
+        )
+        self.up_stage1 = UpsampleRefineBlock(hidden_channels, hidden_channels)
+        self.up_stage2 = UpsampleRefineBlock(hidden_channels, hidden_channels // 2)
+        self.up_stage3 = UpsampleRefineBlock(hidden_channels // 2, hidden_channels // 4)
+        self.output_refinement = nn.Sequential(
+            ResidualBlock(hidden_channels // 4),
+            nn.Conv2d(hidden_channels // 4, hidden_channels // 8, kernel_size=3, padding=1),
+            nn.GELU(),
+            ResidualBlock(hidden_channels // 8),
         )
         self.output_layer = nn.Sequential(
-            nn.Conv2d(hidden_channels, hidden_channels // 2, kernel_size=3, padding=1),
-            nn.GELU(),
-            nn.Conv2d(hidden_channels // 2, 3, kernel_size=1),
+            nn.Conv2d(hidden_channels // 8, 3, kernel_size=1),
             nn.Sigmoid(),
         )
 
@@ -256,7 +285,12 @@ class ReconstructionHead(nn.Module):
         fused = self.mid_fusion(torch.cat([fused, level1], dim=1))
         fused = F.interpolate(fused, size=level0.shape[-2:], mode="bilinear", align_corners=False)
         fused = self.low_fusion(torch.cat([fused, level0], dim=1))
-        fused = F.interpolate(fused, size=output_size, mode="bilinear", align_corners=False)
+        fused = self.up_stage1(fused)
+        fused = self.up_stage2(fused)
+        fused = self.up_stage3(fused)
+        if fused.shape[-2:] != output_size:
+            fused = F.interpolate(fused, size=output_size, mode="bilinear", align_corners=False)
+        fused = self.output_refinement(fused)
         return self.output_layer(fused)
 
 

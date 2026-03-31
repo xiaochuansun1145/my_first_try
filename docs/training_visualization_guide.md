@@ -83,12 +83,13 @@ python scripts/plot_stage1_metrics.py --metrics outputs/mdvsc_stage1/metrics.jso
 - 恢复后的特征虽然接近 teacher，但对 RGB 还原还不够友好；
 - 数据分辨率过高，导致重建头学习困难。
 
-如果你的训练日志里已经包含 `phase` 字段，图上还会出现一条阶段切换竖线。它表示训练从“只训练 reconstruction head”切换到了“MDVSC + reconstruction head 联合训练”。
+如果你的训练日志里已经包含 `phase` 字段，图上还会出现阶段切换竖线。它表示训练在 reconstruction pretrain、MDVSC bootstrap、joint training 之间切换。
 
 一个常见现象是：
 
 - 在 reconstruction pretrain 阶段，recon_l1、recon_mse、recon_ssim 会下降较快；
-- 切到 joint training 阶段后，feature_loss 和 detection consistency 才开始真正发挥作用。
+- 切到 mdvsc_bootstrap 阶段后，feature_loss 会开始真正发挥作用；
+- 切到 joint training 阶段后，detection consistency 才会进入总损失。
 
 ## 三、detection_consistency.png 怎么看
 

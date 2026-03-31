@@ -66,6 +66,8 @@ class Stage1OptimizationConfig:
     num_workers: int = 4
     reconstruction_pretrain_epochs: int = 3
     reconstruction_pretrain_lr: float = 3e-4
+    mdvsc_bootstrap_epochs: int = 3
+    mdvsc_bootstrap_lr: float = 1e-4
     epochs: int = 10
     lr: float = 1e-4
     weight_decay: float = 1e-4
