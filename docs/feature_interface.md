@@ -6,8 +6,8 @@
 
 ## 切点
 
-- 切分位置：RT-DETR hybrid encoder 之后、decoder 输入展平之前。
-- 负载类型：多尺度 feature map，而不是 RGB 像素，也不是 decoder query。
+- 切分位置：RT-DETR backbone 输出经过 encoder_input_proj 投影到 256 通道之后、hybrid encoder 之前。
+- 负载类型：三层 256 通道的多尺度 projected backbone feature map，而不是 RGB 像素，也不是 decoder query。
 - 当前参考模型：PekingU/rtdetr_r50vd。
 
 ## 负载结构
@@ -29,7 +29,7 @@
 
 在当前仓库 MVP 中，FeaturePacket 仍然只是面向信道实验的占位容器。在目标项目架构中，它应逐步演化成一个 latent 域语义 packet，而不是直接切一段原始 RT-DETR feature bundle 来传。
 
-以当前基线图像 byc.jpg 为例，契约如下：
+以当前参考模型为例，切点后的三层 projected backbone feature 契约如下：
 
 - level 0：shape 为 [1, 256, 80, 80]，stride 为 8
 - level 1：shape 为 [1, 256, 40, 40]，stride 为 16
@@ -65,8 +65,8 @@
 - identity：严格透传，用于无损验证。
 - awgn：直接在特征张量上注入加性高斯白噪声。
 
-## Decoder 交接
+## Encoder / Decoder 交接
 
-恢复后的 feature map 会先回填成完整的 EncoderFeatureBundle，然后经过 RT-DETR decoder_input_proj、展平，并送入原始 decoder，整个 decoder API 不做改动。
+恢复后的 projected backbone feature map 会先回填成完整的 EncoderFeatureBundle，然后重新经过 RT-DETR hybrid encoder，再送入原始 decoder 与 detection head，整个下游 API 不做改动。
 
 在目标项目架构中，这个恢复语义包除了送入 RT-DETR 检测分支外，还会同时进入一个重建分支。

@@ -270,7 +270,7 @@ class Stage1Trainer:
 
             with torch.no_grad():
                 detector_inputs = self.baseline.prepare_frame_tensor_batch(flat_frames)
-                teacher_bundle = self.baseline.extract_encoder_feature_bundle(detector_inputs)
+                teacher_bundle = self.baseline.extract_projected_backbone_feature_bundle(detector_inputs)
                 teacher_outputs = None
                 if phase == PHASE_JOINT_TRAINING and (
                     self.config.loss.detection_logit_weight > 0.0 or self.config.loss.detection_box_weight > 0.0
@@ -369,9 +369,13 @@ class Stage1Trainer:
                 feature_loss = feature_loss + float(level_weight) * F.smooth_l1_loss(restored_sequence, target_sequence)
 
         reconstructed_frames = model_outputs.reconstructed_frames
-        recon_l1_loss = F.l1_loss(reconstructed_frames, frames)
-        recon_mse_loss = F.mse_loss(reconstructed_frames, frames)
-        recon_ssim_loss = _ssim_loss(reconstructed_frames, frames)
+        recon_l1_loss = torch.zeros((), device=frames.device)
+        recon_mse_loss = torch.zeros((), device=frames.device)
+        recon_ssim_loss = torch.zeros((), device=frames.device)
+        if phase in {PHASE_RECONSTRUCTION_PRETRAIN, PHASE_JOINT_TRAINING}:
+            recon_l1_loss = F.l1_loss(reconstructed_frames, frames)
+            recon_mse_loss = F.mse_loss(reconstructed_frames, frames)
+            recon_ssim_loss = _ssim_loss(reconstructed_frames, frames)
 
         detection_logit_loss = torch.zeros((), device=frames.device)
         detection_box_loss = torch.zeros((), device=frames.device)

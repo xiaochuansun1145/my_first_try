@@ -82,7 +82,7 @@ class RTDetrBaseline:
         return self.model(**inputs, return_dict=True)
 
     @torch.no_grad()
-    def extract_encoder_feature_bundle(self, inputs: dict[str, torch.Tensor]) -> EncoderFeatureBundle:
+    def extract_projected_backbone_feature_bundle(self, inputs: dict[str, torch.Tensor]) -> EncoderFeatureBundle:
         core_model = self.model.model
         pixel_values = inputs["pixel_values"]
         pixel_mask = inputs.get("pixel_mask")
@@ -96,23 +96,19 @@ class RTDetrBaseline:
             core_model.encoder_input_proj[level](source)
             for level, (source, _mask) in enumerate(backbone_features)
         ]
-        encoder_outputs = core_model.encoder(
-            projected_features,
-            output_attentions=False,
-            output_hidden_states=False,
-            return_dict=True,
-        )
-
-        feature_maps = list(encoder_outputs.last_hidden_state)
-        decoder_sources = self._build_decoder_sources(feature_maps)
+        decoder_sources = self._build_decoder_sources(projected_features)
         spatial_shapes, level_start_index = self._build_decoder_indices(decoder_sources)
 
         return EncoderFeatureBundle(
-            feature_maps=feature_maps,
+            feature_maps=list(projected_features),
             spatial_shapes=spatial_shapes,
             level_start_index=level_start_index,
             strides=list(core_model.encoder.out_strides),
         )
+
+    @torch.no_grad()
+    def extract_encoder_feature_bundle(self, inputs: dict[str, torch.Tensor]) -> EncoderFeatureBundle:
+        return self.extract_projected_backbone_feature_bundle(inputs)
 
     @torch.inference_mode()
     def predict_from_encoder_feature_bundle(
@@ -127,7 +123,14 @@ class RTDetrBaseline:
         inputs: dict[str, torch.Tensor],
         feature_bundle: EncoderFeatureBundle,
     ):
-        encoder_outputs = BaseModelOutput(last_hidden_state=feature_bundle.feature_maps)
+        core_model = self.model.model
+        encoded_outputs = core_model.encoder(
+            feature_bundle.feature_maps,
+            output_attentions=False,
+            output_hidden_states=False,
+            return_dict=True,
+        )
+        encoder_outputs = BaseModelOutput(last_hidden_state=list(encoded_outputs.last_hidden_state))
         return self.model(
             pixel_values=inputs["pixel_values"],
             pixel_mask=inputs.get("pixel_mask"),

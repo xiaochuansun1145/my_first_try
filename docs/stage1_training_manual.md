@@ -12,9 +12,9 @@
 
 当前默认训练流程已经升级为三段式：
 
-- 先冻结 RT-DETR teacher，只训练 reconstruction head，让它先学会把 teacher 特征还原成图像；
-- 再冻结 reconstruction head，只训练 MDVSC，让它先适配一个稳定的重建解码器；
-- 最后再做 MDVSC + reconstruction head 的联合训练。
+- 先冻结 RT-DETR teacher，只训练 reconstruction head，让它先学会把 projected backbone 特征还原成图像；
+- 再冻结 reconstruction head，只训练 MDVSC，并且这一阶段只看 feature loss；
+- 最后再做 MDVSC + reconstruction head 的联合训练，同时优化图像重建和检测一致性。
 
 这样做的目的，是避免 reconstruction head 和 MDVSC 同时从随机初始化开始、彼此拖累收敛，同时减少在 MDVSC 刚接入时重建头被不稳定输入分布带偏的风险。
 
@@ -197,8 +197,8 @@ data:
 - `loss.recon_mse_weight`：像素 MSE 重建权重。
 - `loss.recon_ssim_weight`：SSIM 重建权重。
 - reconstruction head 预训练阶段默认只使用重建相关损失，不使用 feature loss 和 detection consistency loss。
-- MDVSC bootstrap 阶段默认使用 feature loss + 重建损失，但仍不打开 detection consistency loss。
-- 只有最后的 joint training 阶段才会把 detection consistency loss 接入总损失。
+- MDVSC bootstrap 阶段默认只使用 feature loss，不使用任何重建损失或 detection consistency loss。
+- 只有最后的 joint training 阶段才会把图像重建损失和 detection consistency loss 一起接入总损失。
 
 ## 七、推荐起步配置
 
@@ -289,7 +289,9 @@ python scripts/train_mdvsc_stage1.py \
 
 在 reconstruction head 预训练阶段，这张图最直接；如果这个阶段结束时仍然明显模糊，优先怀疑 reconstruction head 容量或重建损失，而不是 MDVSC。
 
-如果切到 MDVSC bootstrap 后重建明显变差，通常说明当前压缩后的特征对重建头来说仍然不够友好；如果到 joint training 后又进一步变差，则往往表示检测一致性和重建目标之间还在抢占容量。
+如果切到 MDVSC bootstrap 后重建图没有继续提升，这是正常现象，因为这一阶段默认不再对重建图施加直接监督；它的任务是先把压缩恢复后的 projected backbone 特征对齐 teacher 特征。
+
+如果到 joint training 后重建图仍然明显变差，则往往表示检测一致性和重建目标之间还在抢占容量，或者当前切点特征对重建本身仍然不够友好。
 
 ### 2. feature_maps 图
 
@@ -355,8 +357,8 @@ python scripts/plot_stage1_metrics.py --metrics outputs/mdvsc_stage1_imagenet_vi
 当前更合理的阶段性现象是：
 
 - reconstruction pretrain 阶段：重建相关损失先明显下降；
-- MDVSC bootstrap 阶段：feature_loss 开始下降，但 detection consistency 仍为 0；
-- joint training 阶段：detection consistency 接入后，总损失短暂上跳，然后重新收敛。
+- MDVSC bootstrap 阶段：feature_loss 开始下降，但重建和 detection consistency 都不进入训练目标；
+- joint training 阶段：重建和 detection consistency 一起接入后，总损失短暂上跳，然后重新收敛。
 
 ## 十三、显存不够时怎么调
 

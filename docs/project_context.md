@@ -30,8 +30,8 @@
 当前约定的目标管线如下：
 
 1. 输入视频片段或 GOP。
-2. 对每一帧运行 RT-DETR backbone 和 hybrid encoder。
-3. 在 hybrid encoder 之后的切点收集多尺度 encoder 特征。
+2. 对每一帧运行 RT-DETR backbone，并取 encoder_input_proj 之后的三层 256 通道 projected backbone 特征。
+3. 在 projected backbone 特征切点收集多尺度语义包。
 4. 通过语义 adaptor 和 latent compressor 将原始 RT-DETR 特征转成更紧凑的 latent 域表示。
 5. temporal aggregator 从 latent 序列中提取时间共享语义。
 6. 将 latent 序列分解为公共分支和个体分支。
@@ -43,7 +43,7 @@
 
 ## 切点与传输对象
 
-RT-DETR 切点固定在 hybrid encoder 之后、decoder 输入展平之前。
+RT-DETR 切点固定在 backbone 输出经过 encoder_input_proj 投影到 256 通道之后、hybrid encoder 之前。
 
 传输对象不是 RGB 视频，也不是 decoder query。传输对象是 encoder 侧的多尺度语义特征包。
 
@@ -167,10 +167,10 @@ per-level refinement block 的作用，是修复信道扰动、mask 引入的伪
    这一阶段的目标，是先获得“没有通信损失时，检测与重建联合最优能够达到的任务上界”。
 
 2. 插入 MDVSC 的结构逼近阶段。
-   在双头上界模型稳定之后，插入 MDVSC 相关模块，包括 latent adaptor、temporal aggregator、semantic encoder、semantic decoder 和 per-level refinement。此时以冻结任务主路径为主：
-   - 优先冻结 RT-DETR 主干、decoder 与 detection head；
+   在双头上界模型稳定之后，插入 MDVSC 相关模块，包括 latent adaptor、semantic encoder、semantic decoder 和 per-level refinement。此时以冻结任务主路径为主：
+   - 优先冻结 RT-DETR 主干、hybrid encoder、decoder 与 detection head；
    - 优先冻结已经稳定的重建主干；
-   - 训练通信相关模块去逼近无通信上界。
+   - 只训练通信相关模块，用 feature loss 去逼近无通信上界。
    这一步建议先使用 identity 或无噪声信道，把通信结构误差先单独学掉。
 
 3. 信道感知的联合通信训练。

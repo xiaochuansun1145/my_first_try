@@ -88,7 +88,7 @@ python scripts/plot_stage1_metrics.py --metrics outputs/mdvsc_stage1/metrics.jso
 一个常见现象是：
 
 - 在 reconstruction pretrain 阶段，recon_l1、recon_mse、recon_ssim 会下降较快；
-- 切到 mdvsc_bootstrap 阶段后，feature_loss 会开始真正发挥作用；
+- 切到 mdvsc_bootstrap 阶段后，feature_loss 会开始真正发挥作用，但重建损失不再直接进入优化目标；
 - 切到 joint training 阶段后，detection consistency 才会进入总损失。
 
 ## 三、detection_consistency.png 怎么看
