@@ -46,17 +46,58 @@ class ResidualBlock(nn.Module):
         return self.activation(outputs + residual)
 
 
+def _group_count(channels: int, preferred_groups: int = 8) -> int:
+    for groups in range(min(preferred_groups, channels), 0, -1):
+        if channels % groups == 0:
+            return groups
+    return 1
+
+
+class ReconstructionResidualBlock(nn.Module):
+    def __init__(self, channels: int):
+        super().__init__()
+        groups = _group_count(channels)
+        self.norm1 = nn.GroupNorm(groups, channels)
+        self.norm2 = nn.GroupNorm(groups, channels)
+        self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+        self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        residual = inputs
+        outputs = self.conv1(F.gelu(self.norm1(inputs)))
+        outputs = self.conv2(F.gelu(self.norm2(outputs)))
+        return outputs + residual
+
+
+class FusionBlock(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int):
+        super().__init__()
+        groups = _group_count(out_channels)
+        self.block = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=1),
+            nn.GroupNorm(groups, out_channels),
+            nn.GELU(),
+            ReconstructionResidualBlock(out_channels),
+            ReconstructionResidualBlock(out_channels),
+        )
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        return self.block(inputs)
+
+
 class UpsampleRefineBlock(nn.Module):
     def __init__(self, in_channels: int, out_channels: int):
         super().__init__()
+        groups = _group_count(out_channels)
         self.upsample = nn.Sequential(
             nn.Conv2d(in_channels, out_channels * 4, kernel_size=3, padding=1),
             nn.GELU(),
             nn.PixelShuffle(2),
+            nn.GroupNorm(groups, out_channels),
         )
         self.refine = nn.Sequential(
-            ResidualBlock(out_channels),
-            ResidualBlock(out_channels),
+            ReconstructionResidualBlock(out_channels),
+            ReconstructionResidualBlock(out_channels),
         )
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
@@ -230,68 +271,67 @@ class PerLevelMDVSC(nn.Module):
 
 
 class ReconstructionHead(nn.Module):
-    def __init__(self, feature_channels: list[int], hidden_channels: int = 128):
+    def __init__(
+        self,
+        feature_channels: list[int],
+        hidden_channels: int = 192,
+        detail_channels: int = 96,
+    ):
         super().__init__()
         if len(feature_channels) != 3:
             raise ValueError("ReconstructionHead expects exactly three feature levels")
 
-        self.level2_proj = nn.Sequential(
-            nn.Conv2d(feature_channels[2], hidden_channels, kernel_size=1),
-            ResidualBlock(hidden_channels),
-            ResidualBlock(hidden_channels),
-        )
-        self.level1_proj = nn.Sequential(
-            nn.Conv2d(feature_channels[1], hidden_channels, kernel_size=1),
-            ResidualBlock(hidden_channels),
-            ResidualBlock(hidden_channels),
-        )
-        self.level0_proj = nn.Sequential(
-            nn.Conv2d(feature_channels[0], hidden_channels, kernel_size=1),
-            ResidualBlock(hidden_channels),
-            ResidualBlock(hidden_channels),
-        )
-        self.mid_fusion = nn.Sequential(
-            nn.Conv2d(hidden_channels * 2, hidden_channels, kernel_size=3, padding=1),
-            nn.GELU(),
-            ResidualBlock(hidden_channels),
-            ResidualBlock(hidden_channels),
-        )
-        self.low_fusion = nn.Sequential(
-            nn.Conv2d(hidden_channels * 2, hidden_channels, kernel_size=3, padding=1),
-            nn.GELU(),
-            ResidualBlock(hidden_channels),
-            ResidualBlock(hidden_channels),
-        )
-        self.up_stage1 = UpsampleRefineBlock(hidden_channels, hidden_channels)
-        self.up_stage2 = UpsampleRefineBlock(hidden_channels, hidden_channels // 2)
-        self.up_stage3 = UpsampleRefineBlock(hidden_channels // 2, hidden_channels // 4)
+        self.level2_semantic_proj = FusionBlock(feature_channels[2], hidden_channels)
+        self.level1_semantic_proj = FusionBlock(feature_channels[1], hidden_channels)
+        self.level0_semantic_proj = FusionBlock(feature_channels[0], hidden_channels)
+        self.level0_detail_proj = FusionBlock(feature_channels[0], detail_channels)
+
+        self.fuse_16 = FusionBlock(hidden_channels * 2, hidden_channels)
+        self.fuse_8 = FusionBlock(hidden_channels * 2, hidden_channels)
+        self.detail_fuse_8 = FusionBlock(hidden_channels + detail_channels, hidden_channels)
+
+        self.up_stage1 = UpsampleRefineBlock(hidden_channels, hidden_channels // 2)
+        self.up_stage2 = UpsampleRefineBlock(hidden_channels // 2, hidden_channels // 4)
+        self.up_stage3 = UpsampleRefineBlock(hidden_channels // 4, hidden_channels // 8)
         self.output_refinement = nn.Sequential(
-            ResidualBlock(hidden_channels // 4),
-            nn.Conv2d(hidden_channels // 4, hidden_channels // 8, kernel_size=3, padding=1),
-            nn.GELU(),
-            ResidualBlock(hidden_channels // 8),
+            ReconstructionResidualBlock(hidden_channels // 8),
+            ReconstructionResidualBlock(hidden_channels // 8),
         )
-        self.output_layer = nn.Sequential(
+        self.base_layer = nn.Sequential(
             nn.Conv2d(hidden_channels // 8, 3, kernel_size=1),
             nn.Sigmoid(),
         )
+        self.detail_layer = nn.Conv2d(hidden_channels // 8, 3, kernel_size=3, padding=1)
 
     def forward(self, feature_maps: list[torch.Tensor], output_size: tuple[int, int]) -> torch.Tensor:
-        level2 = self.level2_proj(feature_maps[2])
-        level1 = self.level1_proj(feature_maps[1])
-        level0 = self.level0_proj(feature_maps[0])
+        level2 = self.level2_semantic_proj(feature_maps[2])
+        level1 = self.level1_semantic_proj(feature_maps[1])
+        level0_semantic = self.level0_semantic_proj(feature_maps[0])
+        level0_detail = self.level0_detail_proj(feature_maps[0])
 
-        fused = F.interpolate(level2, size=level1.shape[-2:], mode="bilinear", align_corners=False)
-        fused = self.mid_fusion(torch.cat([fused, level1], dim=1))
-        fused = F.interpolate(fused, size=level0.shape[-2:], mode="bilinear", align_corners=False)
-        fused = self.low_fusion(torch.cat([fused, level0], dim=1))
-        fused = self.up_stage1(fused)
-        fused = self.up_stage2(fused)
-        fused = self.up_stage3(fused)
-        if fused.shape[-2:] != output_size:
-            fused = F.interpolate(fused, size=output_size, mode="bilinear", align_corners=False)
-        fused = self.output_refinement(fused)
-        return self.output_layer(fused)
+        fused_16 = self.fuse_16(
+            torch.cat(
+                [F.interpolate(level2, size=level1.shape[-2:], mode="nearest"), level1],
+                dim=1,
+            )
+        )
+        fused_8 = self.fuse_8(
+            torch.cat(
+                [F.interpolate(fused_16, size=level0_semantic.shape[-2:], mode="nearest"), level0_semantic],
+                dim=1,
+            )
+        )
+        fused_8 = self.detail_fuse_8(torch.cat([fused_8, level0_detail], dim=1))
+
+        decoded = self.up_stage1(fused_8)
+        decoded = self.up_stage2(decoded)
+        decoded = self.up_stage3(decoded)
+        if decoded.shape[-2:] != output_size:
+            decoded = F.interpolate(decoded, size=output_size, mode="bilinear", align_corners=False)
+        decoded = self.output_refinement(decoded)
+        base = self.base_layer(decoded)
+        detail = 0.1 * torch.tanh(self.detail_layer(decoded))
+        return (base + detail).clamp(0.0, 1.0)
 
 
 class ProjectMDVSC(nn.Module):
@@ -302,6 +342,8 @@ class ProjectMDVSC(nn.Module):
         common_keep_ratios: list[float] | tuple[float, ...] = (0.5, 0.625, 0.75),
         individual_keep_ratios: list[float] | tuple[float, ...] = (0.125, 0.1875, 0.25),
         block_sizes: list[int] | tuple[int, ...] = (8, 4, 2),
+        reconstruction_hidden_channels: int = 192,
+        reconstruction_detail_channels: int = 96,
     ):
         super().__init__()
         self.feature_channels = list(feature_channels)
@@ -309,6 +351,8 @@ class ProjectMDVSC(nn.Module):
         self.common_keep_ratios = list(common_keep_ratios)
         self.individual_keep_ratios = list(individual_keep_ratios)
         self.block_sizes = list(block_sizes)
+        self.reconstruction_hidden_channels = reconstruction_hidden_channels
+        self.reconstruction_detail_channels = reconstruction_detail_channels
 
         if not (
             len(self.feature_channels)
@@ -335,7 +379,11 @@ class ProjectMDVSC(nn.Module):
                 self.block_sizes,
             )
         )
-        self.reconstruction_head = ReconstructionHead(self.feature_channels)
+        self.reconstruction_head = ReconstructionHead(
+            self.feature_channels,
+            hidden_channels=self.reconstruction_hidden_channels,
+            detail_channels=self.reconstruction_detail_channels,
+        )
 
     def reconstruct_from_feature_sequences(
         self,

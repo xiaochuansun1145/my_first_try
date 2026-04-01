@@ -55,6 +55,8 @@ class Stage1MDVSCConfig:
     common_keep_ratios: list[float] = field(default_factory=lambda: [0.5, 0.625, 0.75])
     individual_keep_ratios: list[float] = field(default_factory=lambda: [0.125, 0.1875, 0.25])
     block_sizes: list[int] = field(default_factory=lambda: [8, 4, 2])
+    reconstruction_hidden_channels: int = 192
+    reconstruction_detail_channels: int = 96
     apply_masks: bool = False
     channel_mode: str = "identity"
     snr_db: float = 20.0
@@ -134,6 +136,8 @@ def load_stage1_config(config_path: str | Path) -> MDVSCStage1TrainConfig:
             common_keep_ratios=_as_float_list(mdvsc_data.get("common_keep_ratios"), [0.5, 0.625, 0.75]),
             individual_keep_ratios=_as_float_list(mdvsc_data.get("individual_keep_ratios"), [0.125, 0.1875, 0.25]),
             block_sizes=_as_int_list(mdvsc_data.get("block_sizes"), [8, 4, 2]),
+            reconstruction_hidden_channels=int(mdvsc_data.get("reconstruction_hidden_channels", 192)),
+            reconstruction_detail_channels=int(mdvsc_data.get("reconstruction_detail_channels", 96)),
             apply_masks=bool(mdvsc_data.get("apply_masks", False)),
             channel_mode=str(mdvsc_data.get("channel_mode", "identity")),
             snr_db=float(mdvsc_data.get("snr_db", 20.0)),

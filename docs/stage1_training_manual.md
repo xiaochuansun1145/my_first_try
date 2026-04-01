@@ -190,6 +190,8 @@ data:
 - `mdvsc.latent_dims`：当前默认是 48 / 64 / 96。
 - `mdvsc.common_keep_ratios`：当前默认是 0.5 / 0.625 / 0.75。
 - `mdvsc.individual_keep_ratios`：当前默认是 0.125 / 0.1875 / 0.25。
+- `mdvsc.reconstruction_hidden_channels`：语义主干解码宽度，默认 192。
+- `mdvsc.reconstruction_detail_channels`：最高分辨率细节分支宽度，默认 96。
 
 ### 损失相关
 
@@ -359,6 +361,19 @@ python scripts/plot_stage1_metrics.py --metrics outputs/mdvsc_stage1_imagenet_vi
 - reconstruction pretrain 阶段：重建相关损失先明显下降；
 - MDVSC bootstrap 阶段：feature_loss 开始下降，但重建和 detection consistency 都不进入训练目标；
 - joint training 阶段：重建和 detection consistency 一起接入后，总损失短暂上跳，然后重新收敛。
+
+当前这版 reconstruction head 是按 RT-DETR projected backbone 的 C3/C4/C5 三层结构来设计的：
+
+- level 2 和 level 1 主要提供高层语义与上下文；
+- level 0 同时走一条语义分支和一条细节分支；
+- 解码器先做 top-down 多尺度融合，再逐级上采样回到图像分辨率。
+
+如果你主要想继续提升重建质量，最值得优先试的两个结构参数是：
+
+- `mdvsc.reconstruction_hidden_channels`
+- `mdvsc.reconstruction_detail_channels`
+
+在显存允许时，可以先尝试提升到 224 和 128；如果显存较紧，则保持 192 和 96 更稳妥。
 
 ## 十三、显存不够时怎么调
 

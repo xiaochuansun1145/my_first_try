@@ -128,6 +128,8 @@ class Stage1Trainer:
             common_keep_ratios=config.mdvsc.common_keep_ratios,
             individual_keep_ratios=config.mdvsc.individual_keep_ratios,
             block_sizes=config.mdvsc.block_sizes,
+            reconstruction_hidden_channels=config.mdvsc.reconstruction_hidden_channels,
+            reconstruction_detail_channels=config.mdvsc.reconstruction_detail_channels,
         ).to(self.baseline.device)
         self.optimizer, self.scheduler = self._build_phase_optimizer(PHASE_JOINT_TRAINING)
 
