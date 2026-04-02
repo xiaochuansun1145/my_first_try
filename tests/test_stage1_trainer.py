@@ -4,7 +4,7 @@ import unittest
 
 import torch
 
-from src.semantic_rtdetr.training.stage1_trainer import _gradient_edge_loss, _ssim_loss
+from src.semantic_rtdetr.training.stage1_trainer import _gradient_edge_loss, _resolve_amp_dtype, _ssim_loss
 
 
 class Stage1TrainerUtilityTest(unittest.TestCase):
@@ -34,6 +34,14 @@ class Stage1TrainerUtilityTest(unittest.TestCase):
         ).view_as(frames)
         loss = _gradient_edge_loss(frames, blurred)
         self.assertGreater(float(loss.item()), 0.01)
+
+    def test_resolve_amp_dtype_supports_float16_and_bfloat16(self) -> None:
+        self.assertIs(_resolve_amp_dtype("float16"), torch.float16)
+        self.assertIs(_resolve_amp_dtype("bfloat16"), torch.bfloat16)
+
+    def test_resolve_amp_dtype_rejects_unknown_value(self) -> None:
+        with self.assertRaises(ValueError):
+            _resolve_amp_dtype("float32")
 
 
 if __name__ == "__main__":

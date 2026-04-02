@@ -66,6 +66,8 @@ class Stage1MDVSCConfig:
 class Stage1OptimizationConfig:
     batch_size: int = 1
     num_workers: int = 4
+    use_amp: bool = True
+    amp_dtype: str = "float16"
     reconstruction_pretrain_epochs: int = 3
     reconstruction_pretrain_lr: float = 3e-4
     mdvsc_bootstrap_epochs: int = 3

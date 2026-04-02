@@ -38,6 +38,8 @@ mdvsc:
 optimization:
   batch_size: 1
   num_workers: 4
+  use_amp: true
+  amp_dtype: float16
   reconstruction_pretrain_epochs: 3
   reconstruction_pretrain_lr: 3.0e-4
   mdvsc_bootstrap_epochs: 3

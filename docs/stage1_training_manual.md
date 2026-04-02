@@ -170,6 +170,8 @@ data:
 ### 训练相关
 
 - `optimization.batch_size`：批大小。
+- `optimization.use_amp`：是否在 CUDA 上启用自动混合精度，当前默认建议为 `true`。
+- `optimization.amp_dtype`：AMP 精度类型，当前支持 `float16` 和 `bfloat16`，默认 `float16`。
 - `optimization.reconstruction_pretrain_epochs`：重建头预训练轮数。
 - `optimization.reconstruction_pretrain_lr`：重建头预训练学习率。
 - `optimization.mdvsc_bootstrap_epochs`：冻结重建头时，单独训练 MDVSC 的轮数。
@@ -233,6 +235,8 @@ optimization:
   mdvsc_bootstrap_lr: 1.0e-4
   epochs: 10
   lr: 1.0e-4
+  use_amp: true
+  amp_dtype: float16
 
 loss:
   recon_l1_weight: 1.0
@@ -253,16 +257,6 @@ python scripts/train_mdvsc_stage1.py \
   --data /absolute/path/to/ILSVRC/Data/VID/train
 ```
 
-如果你要用 3 张 4090 训练，直接用 `torchrun`：
-
-```bash
-torchrun --nproc_per_node=3 scripts/train_mdvsc_stage1.py \
-  --config configs/mdvsc_stage1_imagenet_vid_subset.yaml \
-  --data /absolute/path/to/ILSVRC/Data/VID/train
-```
-
-当前训练器已经支持 DDP。这里的 `optimization.batch_size` 表示单卡 batch size，所以如果 YAML 里写的是 2，那么 3 卡训练时全局 batch size 就是 6。
-
 如果你想换输出目录：
 
 ```bash
@@ -270,6 +264,13 @@ python scripts/train_mdvsc_stage1.py \
   --config configs/mdvsc_stage1_imagenet_vid_subset.yaml \
   --data /absolute/path/to/ILSVRC/Data/VID/train \
   --output outputs/mdvsc_stage1_imagenet_vid_run01
+```
+
+如果你怀疑 AMP 带来了数值不稳定，可以先把 YAML 里的下面两项改掉再复现：
+
+```yaml
+optimization:
+  use_amp: false
 ```
 
 ## 九、训练过程中会产出什么
@@ -283,6 +284,8 @@ python scripts/train_mdvsc_stage1.py \
 - `best.pt`：当前最优 checkpoint。
 - `epoch_XXX.pt`：按周期保存的 checkpoint。
 - `final_summary.json`：训练结束摘要。
+
+其中 `final_summary.json` 会额外记录本次训练是否启用了 AMP，以及使用的 AMP dtype。
 
 如果 `output.save_visualizations=true`，还会额外生成：
 
