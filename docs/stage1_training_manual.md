@@ -190,17 +190,19 @@ data:
 - `mdvsc.latent_dims`：当前默认是 48 / 64 / 96。
 - `mdvsc.common_keep_ratios`：当前默认是 0.5 / 0.625 / 0.75。
 - `mdvsc.individual_keep_ratios`：当前默认是 0.125 / 0.1875 / 0.25。
-- `mdvsc.reconstruction_hidden_channels`：语义主干解码宽度，默认 192。
-- `mdvsc.reconstruction_detail_channels`：最高分辨率细节分支宽度，默认 96。
+- `mdvsc.reconstruction_hidden_channels`：语义主干解码宽度，当前推荐默认 256。
+- `mdvsc.reconstruction_detail_channels`：最高分辨率细节分支宽度，当前推荐默认 128。
+- 当前 restored feature 会先经过 shared trunk，再分别进入 detection refinement 和 reconstruction refinement 两条轻分支。
 
 ### 损失相关
 
 - `loss.recon_l1_weight`：像素 L1 重建权重。
 - `loss.recon_mse_weight`：像素 MSE 重建权重。
 - `loss.recon_ssim_weight`：SSIM 重建权重。
+- `loss.recon_edge_weight`：高频边缘重建权重，用于约束纹理和轮廓。
 - reconstruction head 预训练阶段默认只使用重建相关损失，不使用 feature loss 和 detection consistency loss。
 - MDVSC bootstrap 阶段默认只使用 feature loss，不使用任何重建损失或 detection consistency loss。
-- 只有最后的 joint training 阶段才会把图像重建损失和 detection consistency loss 一起接入总损失。
+- 只有最后的 joint training 阶段才会把图像重建损失和 detection consistency loss 一起接入总损失；其中 detection consistency 走 detection refinement 分支，图像重建走 reconstruction refinement 分支。
 
 ## 七、推荐起步配置
 
@@ -236,6 +238,7 @@ loss:
   recon_l1_weight: 1.0
   recon_mse_weight: 0.25
   recon_ssim_weight: 0.25
+  recon_edge_weight: 0.2
 ```
 
 ## 八、怎么启动训练
@@ -285,7 +288,9 @@ python scripts/train_mdvsc_stage1.py \
 `epoch_XXX_reconstruction.png` 里：
 
 - 第一行是原始帧；
-- 第二行是重建帧。
+- 第二行是最终重建帧；
+- 第三行是 base 图像；
+- 第四行是高频 residual 热图。
 
 这张图主要看重建头是否学到了合理的帧级恢复能力。
 
@@ -366,14 +371,15 @@ python scripts/plot_stage1_metrics.py --metrics outputs/mdvsc_stage1_imagenet_vi
 
 - level 2 和 level 1 主要提供高层语义与上下文；
 - level 0 同时走一条语义分支和一条细节分支；
-- 解码器先做 top-down 多尺度融合，再逐级上采样回到图像分辨率。
+- 解码器先做 top-down 多尺度融合，再逐级上采样回到图像分辨率；
+- 最终输出显式拆成 base RGB 和 high-frequency residual，两者相加得到最终重建图。
 
 如果你主要想继续提升重建质量，最值得优先试的两个结构参数是：
 
 - `mdvsc.reconstruction_hidden_channels`
 - `mdvsc.reconstruction_detail_channels`
 
-在显存允许时，可以先尝试提升到 224 和 128；如果显存较紧，则保持 192 和 96 更稳妥。
+你已经验证过 256 和 128 会明显更好，当前建议先把它视为主配置；如果显存还允许，再优先扩大训练数据比例，而不是继续盲目堆宽度。
 
 ## 十三、显存不够时怎么调
 

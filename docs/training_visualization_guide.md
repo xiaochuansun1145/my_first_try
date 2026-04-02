@@ -2,13 +2,13 @@
 
 本文解释第一阶段训练输出中的可视化结果应该怎么看，以及它们分别对应什么训练现象。
 
-需要先说明一个事实：当前第一阶段训练器本身不会自动导出“原图/重建图/热力图”这一类图像面板。当前已经落地的训练输出主要是：
+当前第一阶段训练器已经会自动导出逐 epoch 的图像面板；同时也会持续写出数值日志：
 
 - metrics.jsonl；
 - checkpoint；
 - final_summary.json。
 
-为了把这些数值结果变成可视化图，本仓库补充了一个绘图脚本：
+为了把这些数值结果变成汇总曲线图，本仓库补充了一个绘图脚本：
 
 ```bash
 python scripts/plot_stage1_metrics.py --metrics outputs/mdvsc_stage1/metrics.jsonl
@@ -21,9 +21,9 @@ python scripts/plot_stage1_metrics.py --metrics outputs/mdvsc_stage1/metrics.jso
 - mask_activity.png
 - learning_rate.png
 
-如果训练配置中打开了 output.save_visualizations，训练器本身还会在结果目录下额外保存三类逐 epoch 图像：
+如果训练配置中打开了 output.save_visualizations，训练器本身会在结果目录下额外保存三类逐 epoch 图像：
 
-- reconstruction：原始帧和重建帧对比；
+- reconstruction：原始帧、最终重建帧、base 图像和高频 residual 热图；
 - feature_maps：teacher 特征、restored 特征、绝对误差热图；
 - masks：公共分支通道 mask 和个体分支空间 mask。
 
@@ -39,13 +39,14 @@ python scripts/plot_stage1_metrics.py --metrics outputs/mdvsc_stage1/metrics.jso
 
 ## 二、loss_overview.png 怎么看
 
-这张图会展示四条最核心的训练曲线：
+这张图会展示最核心的重建与特征曲线：
 
 - total_loss
 - feature_loss
 - recon_l1_loss
 - recon_mse_loss
 - recon_ssim_loss
+- recon_edge_loss
 
 ### 1. total_loss
 
@@ -81,7 +82,8 @@ python scripts/plot_stage1_metrics.py --metrics outputs/mdvsc_stage1/metrics.jso
 
 - 重建头容量还不够；
 - 恢复后的特征虽然接近 teacher，但对 RGB 还原还不够友好；
-- 数据分辨率过高，导致重建头学习困难。
+- 数据分辨率过高，导致重建头学习困难；
+- shared trunk 虽然已经接近 teacher，但 reconstruction refinement 还没把高频细节补回来。
 
 如果你的训练日志里已经包含 `phase` 字段，图上还会出现阶段切换竖线。它表示训练在 reconstruction pretrain、MDVSC bootstrap、joint training 之间切换。
 
@@ -166,12 +168,12 @@ python scripts/plot_stage1_metrics.py --metrics outputs/mdvsc_stage1/metrics.jso
 
 ## 六、当前还没有哪些可视化
 
-当前阶段还没有自动导出以下几类图，这些都属于后续建议补充项：
+当前阶段仍然还没有自动导出以下几类图，这些都属于后续建议补充项：
 
 - 不同 level 的单独误差曲线；
 - AWGN 条件下的 SNR 与重建/检测性能对照图。
 
-也就是说，当前“训练可视化”主要还是数值曲线层面的可视化，而不是论文风格的图像面板。
+也就是说，当前“训练可视化”已经同时包含图像面板和数值曲线，但还没到论文展示那种完整对照规模。
 
 ## 七、怎么看一组训练结果是否健康
 

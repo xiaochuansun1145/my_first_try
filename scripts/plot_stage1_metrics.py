@@ -93,7 +93,7 @@ def main() -> None:
     plot_train_val(axes[0, 2], "recon_ssim_loss", "Frame Reconstruction SSIM Loss", "loss")
     plot_train_val(axes[1, 0], "recon_l1_loss", "Frame Reconstruction L1", "loss")
     plot_train_val(axes[1, 1], "recon_mse_loss", "Frame Reconstruction MSE", "loss")
-    axes[1, 2].axis("off")
+    plot_train_val(axes[1, 2], "recon_edge_loss", "Frame Reconstruction Edge Loss", "loss")
     figure.tight_layout()
     figure.savefig(output_dir / "loss_overview.png", dpi=200)
     plt.close(figure)

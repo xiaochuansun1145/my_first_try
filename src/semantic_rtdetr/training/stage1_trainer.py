@@ -103,6 +103,17 @@ def _ssim_loss(prediction: torch.Tensor, target: torch.Tensor, kernel_size: int 
     return 1.0 - ssim_map.mean()
 
 
+def _gradient_edge_loss(prediction: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+    if prediction.shape != target.shape:
+        raise ValueError("prediction and target must have the same shape for gradient edge loss")
+
+    prediction_dx = prediction[..., :, :, 1:] - prediction[..., :, :, :-1]
+    target_dx = target[..., :, :, 1:] - target[..., :, :, :-1]
+    prediction_dy = prediction[..., :, 1:, :] - prediction[..., :, :-1, :]
+    target_dy = target[..., :, 1:, :] - target[..., :, :-1, :]
+    return F.l1_loss(prediction_dx, target_dx) + F.l1_loss(prediction_dy, target_dy)
+
+
 class Stage1Trainer:
     def __init__(self, config: MDVSCStage1TrainConfig):
         self.config = config
@@ -184,6 +195,7 @@ class Stage1Trainer:
         if self.config.optimization.mdvsc_bootstrap_epochs > 0:
             phase_sequence.append((PHASE_MDVSC_BOOTSTRAP, self.config.optimization.mdvsc_bootstrap_epochs))
         phase_sequence.append((PHASE_JOINT_TRAINING, self.config.optimization.epochs))
+        tracked_best_phase = PHASE_JOINT_TRAINING if self.config.optimization.epochs > 0 else phase_sequence[-1][0]
 
         for phase_name, phase_epochs in phase_sequence:
             self.optimizer, self.scheduler = self._build_phase_optimizer(phase_name)
@@ -231,7 +243,7 @@ class Stage1Trainer:
                     handle.write(json.dumps(summary, ensure_ascii=False) + "\n")
 
                 current_val = val_metrics["total_loss"] if val_metrics is not None else train_metrics["total_loss"]
-                if best_val_loss is None or current_val < best_val_loss:
+                if phase_name == tracked_best_phase and (best_val_loss is None or current_val < best_val_loss):
                     best_val_loss = current_val
                     self._save_checkpoint("best.pt", global_epoch, summary)
 
@@ -345,6 +357,7 @@ class Stage1Trainer:
             "recon_l1_loss": metric_sums["recon_l1"] / steps,
             "recon_mse_loss": metric_sums["recon_mse"] / steps,
             "recon_ssim_loss": metric_sums["recon_ssim"] / steps,
+            "recon_edge_loss": metric_sums["recon_edge"] / steps,
             "detection_logit_loss": metric_sums["detection_logit"] / steps,
             "detection_box_loss": metric_sums["detection_box"] / steps,
             "common_active_ratio": metric_sums["common_active_ratio"] / steps,
@@ -374,10 +387,12 @@ class Stage1Trainer:
         recon_l1_loss = torch.zeros((), device=frames.device)
         recon_mse_loss = torch.zeros((), device=frames.device)
         recon_ssim_loss = torch.zeros((), device=frames.device)
+        recon_edge_loss = torch.zeros((), device=frames.device)
         if phase in {PHASE_RECONSTRUCTION_PRETRAIN, PHASE_JOINT_TRAINING}:
             recon_l1_loss = F.l1_loss(reconstructed_frames, frames)
             recon_mse_loss = F.mse_loss(reconstructed_frames, frames)
             recon_ssim_loss = _ssim_loss(reconstructed_frames, frames)
+            recon_edge_loss = _gradient_edge_loss(reconstructed_frames, frames)
 
         detection_logit_loss = torch.zeros((), device=frames.device)
         detection_box_loss = torch.zeros((), device=frames.device)
@@ -386,7 +401,7 @@ class Stage1Trainer:
             and teacher_outputs is not None
             and (self.config.loss.detection_logit_weight > 0.0 or self.config.loss.detection_box_weight > 0.0)
         ):
-            student_bundle = _sequences_to_bundle(model_outputs.restored_sequences, teacher_bundle)
+            student_bundle = _sequences_to_bundle(model_outputs.detection_sequences, teacher_bundle)
             student_outputs = self.baseline.forward_from_encoder_feature_bundle(detector_inputs, student_bundle)
             detection_logit_loss = F.mse_loss(student_outputs.logits, teacher_outputs.logits.detach())
             detection_box_loss = F.l1_loss(student_outputs.pred_boxes, teacher_outputs.pred_boxes.detach())
@@ -396,6 +411,7 @@ class Stage1Trainer:
             + self.config.loss.recon_l1_weight * recon_l1_loss
             + self.config.loss.recon_mse_weight * recon_mse_loss
             + self.config.loss.recon_ssim_weight * recon_ssim_loss
+            + self.config.loss.recon_edge_weight * recon_edge_loss
             + self.config.loss.detection_logit_weight * detection_logit_loss
             + self.config.loss.detection_box_weight * detection_box_loss
         )
@@ -406,6 +422,7 @@ class Stage1Trainer:
             "recon_l1": recon_l1_loss,
             "recon_mse": recon_mse_loss,
             "recon_ssim": recon_ssim_loss,
+            "recon_edge": recon_edge_loss,
             "detection_logit": detection_logit_loss,
             "detection_box": detection_box_loss,
         }
@@ -439,9 +456,14 @@ class Stage1Trainer:
     def _set_phase_trainability(self, phase: str) -> None:
         reconstruction_trainable = phase in {PHASE_RECONSTRUCTION_PRETRAIN, PHASE_JOINT_TRAINING}
         mdvsc_trainable = phase in {PHASE_MDVSC_BOOTSTRAP, PHASE_JOINT_TRAINING}
+        detection_adaptation_trainable = phase == PHASE_JOINT_TRAINING
 
         for parameter in self.model.reconstruction_head.parameters():
             parameter.requires_grad = reconstruction_trainable
+        for parameter in self.model.reconstruction_refinement_heads.parameters():
+            parameter.requires_grad = reconstruction_trainable
+        for parameter in self.model.detection_refinement_heads.parameters():
+            parameter.requires_grad = detection_adaptation_trainable
         for parameter in self.model.level_modules.parameters():
             parameter.requires_grad = mdvsc_trainable
 
@@ -506,9 +528,12 @@ class Stage1Trainer:
         original_frames = frames[0, :max_frames].detach().cpu().permute(0, 2, 3, 1).numpy()
         reconstructed_frames = model_outputs.reconstructed_frames[0, :max_frames].detach().cpu().permute(0, 2, 3, 1).numpy()
 
-        figure, axes = plt.subplots(2, max_frames, figsize=(4 * max_frames, 8))
+        reconstructed_base_frames = model_outputs.reconstructed_base_frames[0, :max_frames].detach().cpu().permute(0, 2, 3, 1).numpy()
+        high_frequency_maps = model_outputs.reconstructed_high_frequency_residuals[0, :max_frames].detach().cpu().abs().mean(dim=1).numpy()
+
+        figure, axes = plt.subplots(4, max_frames, figsize=(4 * max_frames, 12))
         if max_frames == 1:
-            axes = np.array([[axes[0]], [axes[1]]])
+            axes = np.array([[axes[0]], [axes[1]], [axes[2]], [axes[3]]])
         for frame_index in range(max_frames):
             axes[0, frame_index].imshow(original_frames[frame_index])
             axes[0, frame_index].set_title(f"original t={frame_index}")
@@ -516,6 +541,12 @@ class Stage1Trainer:
             axes[1, frame_index].imshow(reconstructed_frames[frame_index])
             axes[1, frame_index].set_title(f"reconstructed t={frame_index}")
             axes[1, frame_index].axis("off")
+            axes[2, frame_index].imshow(reconstructed_base_frames[frame_index])
+            axes[2, frame_index].set_title(f"base t={frame_index}")
+            axes[2, frame_index].axis("off")
+            axes[3, frame_index].imshow(high_frequency_maps[frame_index], cmap="magma")
+            axes[3, frame_index].set_title(f"high-frequency residual t={frame_index}")
+            axes[3, frame_index].axis("off")
         figure.tight_layout()
         figure.savefig(vis_dir / f"epoch_{epoch:03d}_reconstruction.png", dpi=180)
         plt.close(figure)

@@ -23,7 +23,11 @@ class LevelTransmissionStats:
 @dataclass
 class MDVSCOutput:
     restored_sequences: list[torch.Tensor]
+    detection_sequences: list[torch.Tensor]
+    reconstruction_sequences: list[torch.Tensor]
     reconstructed_frames: torch.Tensor
+    reconstructed_base_frames: torch.Tensor
+    reconstructed_high_frequency_residuals: torch.Tensor
     level_stats: list[LevelTransmissionStats]
     common_masks: list[torch.Tensor]
     individual_masks: list[torch.Tensor]
@@ -83,6 +87,23 @@ class FusionBlock(nn.Module):
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         return self.block(inputs)
+
+
+class TaskAdaptationBlock(nn.Module):
+    def __init__(self, channels: int):
+        super().__init__()
+        groups = _group_count(channels)
+        self.block = nn.Sequential(
+            nn.Conv2d(channels, channels, kernel_size=1),
+            nn.GroupNorm(groups, channels),
+            nn.GELU(),
+            ReconstructionResidualBlock(channels),
+            ReconstructionResidualBlock(channels),
+            nn.Conv2d(channels, channels, kernel_size=1),
+        )
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        return inputs + self.block(inputs)
 
 
 class UpsampleRefineBlock(nn.Module):
@@ -274,8 +295,8 @@ class ReconstructionHead(nn.Module):
     def __init__(
         self,
         feature_channels: list[int],
-        hidden_channels: int = 192,
-        detail_channels: int = 96,
+        hidden_channels: int = 256,
+        detail_channels: int = 128,
     ):
         super().__init__()
         if len(feature_channels) != 3:
@@ -297,13 +318,21 @@ class ReconstructionHead(nn.Module):
             ReconstructionResidualBlock(hidden_channels // 8),
             ReconstructionResidualBlock(hidden_channels // 8),
         )
+        self.high_frequency_refinement = nn.Sequential(
+            ReconstructionResidualBlock(hidden_channels // 8),
+            ReconstructionResidualBlock(hidden_channels // 8),
+        )
         self.base_layer = nn.Sequential(
             nn.Conv2d(hidden_channels // 8, 3, kernel_size=1),
             nn.Sigmoid(),
         )
         self.detail_layer = nn.Conv2d(hidden_channels // 8, 3, kernel_size=3, padding=1)
 
-    def forward(self, feature_maps: list[torch.Tensor], output_size: tuple[int, int]) -> torch.Tensor:
+    def decode_components(
+        self,
+        feature_maps: list[torch.Tensor],
+        output_size: tuple[int, int],
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         level2 = self.level2_semantic_proj(feature_maps[2])
         level1 = self.level1_semantic_proj(feature_maps[1])
         level0_semantic = self.level0_semantic_proj(feature_maps[0])
@@ -330,8 +359,14 @@ class ReconstructionHead(nn.Module):
             decoded = F.interpolate(decoded, size=output_size, mode="bilinear", align_corners=False)
         decoded = self.output_refinement(decoded)
         base = self.base_layer(decoded)
-        detail = 0.1 * torch.tanh(self.detail_layer(decoded))
-        return (base + detail).clamp(0.0, 1.0)
+        high_frequency_features = self.high_frequency_refinement(decoded)
+        high_frequency_residual = 0.1 * torch.tanh(self.detail_layer(high_frequency_features))
+        reconstructed = (base + high_frequency_residual).clamp(0.0, 1.0)
+        return reconstructed, base, high_frequency_residual
+
+    def forward(self, feature_maps: list[torch.Tensor], output_size: tuple[int, int]) -> torch.Tensor:
+        reconstructed, _, _ = self.decode_components(feature_maps, output_size)
+        return reconstructed
 
 
 class ProjectMDVSC(nn.Module):
@@ -342,8 +377,8 @@ class ProjectMDVSC(nn.Module):
         common_keep_ratios: list[float] | tuple[float, ...] = (0.5, 0.625, 0.75),
         individual_keep_ratios: list[float] | tuple[float, ...] = (0.125, 0.1875, 0.25),
         block_sizes: list[int] | tuple[int, ...] = (8, 4, 2),
-        reconstruction_hidden_channels: int = 192,
-        reconstruction_detail_channels: int = 96,
+        reconstruction_hidden_channels: int = 256,
+        reconstruction_detail_channels: int = 128,
     ):
         super().__init__()
         self.feature_channels = list(feature_channels)
@@ -384,6 +419,49 @@ class ProjectMDVSC(nn.Module):
             hidden_channels=self.reconstruction_hidden_channels,
             detail_channels=self.reconstruction_detail_channels,
         )
+        self.detection_refinement_heads = nn.ModuleList(
+            TaskAdaptationBlock(channels) for channels in self.feature_channels
+        )
+        self.reconstruction_refinement_heads = nn.ModuleList(
+            TaskAdaptationBlock(channels) for channels in self.feature_channels
+        )
+
+    @staticmethod
+    def _apply_refinement(
+        feature_sequences: list[torch.Tensor],
+        refinement_heads: nn.ModuleList,
+    ) -> list[torch.Tensor]:
+        refined_sequences: list[torch.Tensor] = []
+        for feature_sequence, refinement_head in zip(feature_sequences, refinement_heads):
+            batch_size, time_steps, channels, height, width = feature_sequence.shape
+            flattened = feature_sequence.reshape(batch_size * time_steps, channels, height, width)
+            refined = refinement_head(flattened)
+            refined_sequences.append(refined.reshape(batch_size, time_steps, channels, height, width))
+        return refined_sequences
+
+    def _decode_reconstruction_sequences(
+        self,
+        feature_sequences: list[torch.Tensor],
+        output_size: tuple[int, int],
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        time_steps = feature_sequences[0].shape[1]
+        reconstructed_frames: list[torch.Tensor] = []
+        reconstructed_base_frames: list[torch.Tensor] = []
+        reconstructed_high_frequency_residuals: list[torch.Tensor] = []
+        for frame_index in range(time_steps):
+            reconstructed, base, high_frequency_residual = self.reconstruction_head.decode_components(
+                [level_sequence[:, frame_index] for level_sequence in feature_sequences],
+                output_size=output_size,
+            )
+            reconstructed_frames.append(reconstructed)
+            reconstructed_base_frames.append(base)
+            reconstructed_high_frequency_residuals.append(high_frequency_residual)
+
+        return (
+            torch.stack(reconstructed_frames, dim=1),
+            torch.stack(reconstructed_base_frames, dim=1),
+            torch.stack(reconstructed_high_frequency_residuals, dim=1),
+        )
 
     def reconstruct_from_feature_sequences(
         self,
@@ -393,16 +471,11 @@ class ProjectMDVSC(nn.Module):
         if len(feature_sequences) != len(self.level_modules):
             raise ValueError("feature_sequences must match the configured number of levels")
 
-        time_steps = feature_sequences[0].shape[1]
-        reconstructed_frames = torch.stack(
-            [
-                self.reconstruction_head(
-                    [level_sequence[:, frame_index] for level_sequence in feature_sequences],
-                    output_size=output_size,
-                )
-                for frame_index in range(time_steps)
-            ],
-            dim=1,
+        detection_sequences = self._apply_refinement(feature_sequences, self.detection_refinement_heads)
+        reconstruction_sequences = self._apply_refinement(feature_sequences, self.reconstruction_refinement_heads)
+        reconstructed_frames, reconstructed_base_frames, reconstructed_high_frequency_residuals = self._decode_reconstruction_sequences(
+            reconstruction_sequences,
+            output_size=output_size,
         )
 
         level_stats: list[LevelTransmissionStats] = []
@@ -436,7 +509,11 @@ class ProjectMDVSC(nn.Module):
 
         return MDVSCOutput(
             restored_sequences=list(feature_sequences),
+            detection_sequences=detection_sequences,
+            reconstruction_sequences=reconstruction_sequences,
             reconstructed_frames=reconstructed_frames,
+            reconstructed_base_frames=reconstructed_base_frames,
+            reconstructed_high_frequency_residuals=reconstructed_high_frequency_residuals,
             level_stats=level_stats,
             common_masks=common_masks,
             individual_masks=individual_masks,
@@ -470,10 +547,19 @@ class ProjectMDVSC(nn.Module):
             common_masks.append(common_mask)
             individual_masks.append(individual_mask)
 
-        direct_reconstruction = self.reconstruct_from_feature_sequences(restored_sequences, output_size=output_size)
+        detection_sequences = self._apply_refinement(restored_sequences, self.detection_refinement_heads)
+        reconstruction_sequences = self._apply_refinement(restored_sequences, self.reconstruction_refinement_heads)
+        reconstructed_frames, reconstructed_base_frames, reconstructed_high_frequency_residuals = self._decode_reconstruction_sequences(
+            reconstruction_sequences,
+            output_size=output_size,
+        )
         return MDVSCOutput(
             restored_sequences=restored_sequences,
-            reconstructed_frames=direct_reconstruction.reconstructed_frames,
+            detection_sequences=detection_sequences,
+            reconstruction_sequences=reconstruction_sequences,
+            reconstructed_frames=reconstructed_frames,
+            reconstructed_base_frames=reconstructed_base_frames,
+            reconstructed_high_frequency_residuals=reconstructed_high_frequency_residuals,
             level_stats=level_stats,
             common_masks=common_masks,
             individual_masks=individual_masks,

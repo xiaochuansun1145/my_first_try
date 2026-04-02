@@ -86,7 +86,7 @@ python scripts/run_semcom_pipeline.py --config configs/rtdetr_semcom_mvp.yaml --
 python scripts/train_mdvsc_stage1.py --config configs/mdvsc_stage1.yaml --data /absolute/path/to/data
 ```
 
-当前默认训练路线已经改成三段式：先用冻结的 RT-DETR backbone 投影特征单独预训练 reconstruction head，再冻结 reconstruction head 训练 MDVSC 并只看 feature loss，最后做 MDVSC + reconstruction head 的图像重建与检测联合微调。重建项除了 L1 和 MSE，也默认加入了 SSIM loss。
+当前默认训练路线已经改成三段式：先用冻结的 RT-DETR backbone 投影特征单独预训练 reconstruction head，再冻结 reconstruction 支路训练 MDVSC 并只看 feature loss，最后做 MDVSC + 双任务轻分叉的图像重建与检测联合微调。当前 shared restored feature 会再拆成 detection refinement 和 reconstruction refinement 两条轻分支；重建项除了 L1、MSE 和 SSIM，也默认加入高频边缘损失。
 
 详细步骤见 [docs/stage1_training_manual.md](docs/stage1_training_manual.md)。
 

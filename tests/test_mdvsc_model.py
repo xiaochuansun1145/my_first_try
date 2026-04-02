@@ -26,6 +26,10 @@ class ProjectMDVSCTest(unittest.TestCase):
 
         self.assertEqual(outputs.reconstructed_frames.shape, (2, 3, 3, 64, 64))
         self.assertEqual(outputs.restored_sequences[0].shape, feature_sequences[0].shape)
+        self.assertEqual(outputs.detection_sequences[0].shape, feature_sequences[0].shape)
+        self.assertEqual(outputs.reconstruction_sequences[0].shape, feature_sequences[0].shape)
+        self.assertEqual(outputs.reconstructed_base_frames.shape, (2, 3, 3, 64, 64))
+        self.assertEqual(outputs.reconstructed_high_frequency_residuals.shape, (2, 3, 3, 64, 64))
 
     def test_forward_preserves_multiscale_shapes(self) -> None:
         model = ProjectMDVSC(
@@ -47,6 +51,8 @@ class ProjectMDVSCTest(unittest.TestCase):
         self.assertEqual(outputs.restored_sequences[0].shape, inputs[0].shape)
         self.assertEqual(outputs.restored_sequences[1].shape, inputs[1].shape)
         self.assertEqual(outputs.restored_sequences[2].shape, inputs[2].shape)
+        self.assertEqual(outputs.detection_sequences[0].shape, inputs[0].shape)
+        self.assertEqual(outputs.reconstruction_sequences[0].shape, inputs[0].shape)
         self.assertEqual(outputs.reconstructed_frames.shape, (2, 3, 3, 64, 64))
 
     def test_mask_stats_stay_in_unit_interval(self) -> None:
