@@ -123,6 +123,10 @@ def _resolve_amp_dtype(amp_dtype: str) -> torch.dtype:
     raise ValueError(f"Unsupported AMP dtype: {amp_dtype}")
 
 
+def _to_numpy_float_array(tensor: torch.Tensor) -> np.ndarray:
+    return tensor.detach().float().cpu().numpy()
+
+
 class Stage1Trainer:
     def __init__(self, config: MDVSCStage1TrainConfig):
         self.config = config
@@ -562,11 +566,17 @@ class Stage1Trainer:
         vis_dir.mkdir(parents=True, exist_ok=True)
 
         max_frames = min(self.config.output.visualization_num_frames, frames.shape[1])
-        original_frames = frames[0, :max_frames].detach().cpu().permute(0, 2, 3, 1).numpy()
-        reconstructed_frames = model_outputs.reconstructed_frames[0, :max_frames].detach().cpu().permute(0, 2, 3, 1).numpy()
+        original_frames = _to_numpy_float_array(frames[0, :max_frames].permute(0, 2, 3, 1))
+        reconstructed_frames = _to_numpy_float_array(
+            model_outputs.reconstructed_frames[0, :max_frames].permute(0, 2, 3, 1)
+        )
 
-        reconstructed_base_frames = model_outputs.reconstructed_base_frames[0, :max_frames].detach().cpu().permute(0, 2, 3, 1).numpy()
-        high_frequency_maps = model_outputs.reconstructed_high_frequency_residuals[0, :max_frames].detach().cpu().abs().mean(dim=1).numpy()
+        reconstructed_base_frames = _to_numpy_float_array(
+            model_outputs.reconstructed_base_frames[0, :max_frames].permute(0, 2, 3, 1)
+        )
+        high_frequency_maps = _to_numpy_float_array(
+            model_outputs.reconstructed_high_frequency_residuals[0, :max_frames].abs().mean(dim=1)
+        )
 
         figure, axes = plt.subplots(4, max_frames, figsize=(4 * max_frames, 12))
         if max_frames == 1:
@@ -593,8 +603,8 @@ class Stage1Trainer:
         if num_levels == 1:
             axes = np.array([axes])
         for level_index in range(num_levels):
-            teacher_map = target_sequences[level_index][0, 0].detach().cpu().mean(dim=0).numpy()
-            student_map = model_outputs.restored_sequences[level_index][0, 0].detach().cpu().mean(dim=0).numpy()
+            teacher_map = _to_numpy_float_array(target_sequences[level_index][0, 0].mean(dim=0))
+            student_map = _to_numpy_float_array(model_outputs.restored_sequences[level_index][0, 0].mean(dim=0))
             diff_map = np.abs(student_map - teacher_map)
             axes[level_index, 0].imshow(teacher_map, cmap="viridis")
             axes[level_index, 0].set_title(f"level {level_index} teacher")
@@ -612,8 +622,8 @@ class Stage1Trainer:
         if num_levels == 1:
             axes = np.array([axes])
         for level_index in range(num_levels):
-            common_mask = model_outputs.common_masks[level_index][0, :, 0, 0].detach().cpu().numpy()[None, :]
-            individual_mask = model_outputs.individual_masks[level_index][0, 0, 0].detach().cpu().numpy()
+            common_mask = _to_numpy_float_array(model_outputs.common_masks[level_index][0, :, 0, 0])[None, :]
+            individual_mask = _to_numpy_float_array(model_outputs.individual_masks[level_index][0, 0, 0])
             axes[level_index, 0].imshow(common_mask, cmap="gray", aspect="auto", vmin=0.0, vmax=1.0)
             axes[level_index, 0].set_title(f"level {level_index} common mask")
             axes[level_index, 1].imshow(individual_mask, cmap="gray", vmin=0.0, vmax=1.0)

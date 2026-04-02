@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import unittest
 
+import numpy as np
 import torch
 
-from src.semantic_rtdetr.training.stage1_trainer import _gradient_edge_loss, _resolve_amp_dtype, _ssim_loss
+from src.semantic_rtdetr.training.stage1_trainer import _gradient_edge_loss, _resolve_amp_dtype, _ssim_loss, _to_numpy_float_array
 
 
 class Stage1TrainerUtilityTest(unittest.TestCase):
@@ -42,6 +43,11 @@ class Stage1TrainerUtilityTest(unittest.TestCase):
     def test_resolve_amp_dtype_rejects_unknown_value(self) -> None:
         with self.assertRaises(ValueError):
             _resolve_amp_dtype("float32")
+
+    def test_to_numpy_float_array_promotes_half_precision(self) -> None:
+        tensor = torch.rand(2, 3, dtype=torch.float16)
+        array = _to_numpy_float_array(tensor)
+        self.assertEqual(array.dtype, np.float32)
 
 
 if __name__ == "__main__":
