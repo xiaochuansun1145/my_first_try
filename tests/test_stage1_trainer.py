@@ -5,7 +5,13 @@ import unittest
 import numpy as np
 import torch
 
-from src.semantic_rtdetr.training.stage1_trainer import _gradient_edge_loss, _resolve_amp_dtype, _ssim_loss, _to_numpy_float_array
+from src.semantic_rtdetr.training.stage1_trainer import (
+    _ensure_finite_tensor,
+    _gradient_edge_loss,
+    _resolve_amp_dtype,
+    _ssim_loss,
+    _to_numpy_float_array,
+)
 
 
 class Stage1TrainerUtilityTest(unittest.TestCase):
@@ -48,6 +54,10 @@ class Stage1TrainerUtilityTest(unittest.TestCase):
         tensor = torch.rand(2, 3, dtype=torch.float16)
         array = _to_numpy_float_array(tensor)
         self.assertEqual(array.dtype, np.float32)
+
+    def test_ensure_finite_tensor_rejects_nan(self) -> None:
+        with self.assertRaises(ValueError):
+            _ensure_finite_tensor("nan_tensor", torch.tensor([1.0, float("nan")]))
 
 
 if __name__ == "__main__":

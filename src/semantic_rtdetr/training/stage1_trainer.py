@@ -127,6 +127,21 @@ def _to_numpy_float_array(tensor: torch.Tensor) -> np.ndarray:
     return tensor.detach().float().cpu().numpy()
 
 
+def _ensure_finite_tensor(name: str, tensor: torch.Tensor) -> None:
+    if torch.isfinite(tensor).all():
+        return
+
+    detached = tensor.detach().float()
+    finite_mask = torch.isfinite(detached)
+    finite_values = detached[finite_mask]
+    min_value = float(finite_values.min().item()) if finite_values.numel() > 0 else float("nan")
+    max_value = float(finite_values.max().item()) if finite_values.numel() > 0 else float("nan")
+    raise ValueError(
+        f"Non-finite values detected in {name}: "
+        f"finite={int(finite_mask.sum().item())}/{detached.numel()}, min={min_value}, max={max_value}"
+    )
+
+
 class Stage1Trainer:
     def __init__(self, config: MDVSCStage1TrainConfig):
         self.config = config
@@ -350,6 +365,15 @@ class Stage1Trainer:
                     phase=phase,
                 )
 
+            _ensure_finite_tensor("reconstructed_frames", model_outputs.reconstructed_frames)
+            _ensure_finite_tensor("reconstructed_base_frames", model_outputs.reconstructed_base_frames)
+            _ensure_finite_tensor(
+                "reconstructed_high_frequency_residuals",
+                model_outputs.reconstructed_high_frequency_residuals,
+            )
+            for loss_name, loss_value in loss_dict.items():
+                _ensure_finite_tensor(f"loss.{loss_name}", loss_value)
+
             if training:
                 if self.scaler_enabled:
                     self.grad_scaler.scale(loss_dict["total"]).backward()
@@ -414,28 +438,32 @@ class Stage1Trainer:
         teacher_outputs,
         phase: str,
     ) -> dict[str, torch.Tensor]:
-        feature_loss = torch.zeros((), device=frames.device)
+        frames_fp32 = frames.float()
+        feature_loss = torch.zeros((), device=frames.device, dtype=torch.float32)
         if phase in {PHASE_MDVSC_BOOTSTRAP, PHASE_JOINT_TRAINING}:
             for level_weight, restored_sequence, target_sequence in zip(
                 self.config.loss.level_loss_weights,
                 model_outputs.restored_sequences,
                 target_sequences,
             ):
-                feature_loss = feature_loss + float(level_weight) * F.smooth_l1_loss(restored_sequence, target_sequence)
+                feature_loss = feature_loss + float(level_weight) * F.smooth_l1_loss(
+                    restored_sequence.float(),
+                    target_sequence.float(),
+                )
 
-        reconstructed_frames = model_outputs.reconstructed_frames
-        recon_l1_loss = torch.zeros((), device=frames.device)
-        recon_mse_loss = torch.zeros((), device=frames.device)
-        recon_ssim_loss = torch.zeros((), device=frames.device)
-        recon_edge_loss = torch.zeros((), device=frames.device)
+        reconstructed_frames = model_outputs.reconstructed_frames.float()
+        recon_l1_loss = torch.zeros((), device=frames.device, dtype=torch.float32)
+        recon_mse_loss = torch.zeros((), device=frames.device, dtype=torch.float32)
+        recon_ssim_loss = torch.zeros((), device=frames.device, dtype=torch.float32)
+        recon_edge_loss = torch.zeros((), device=frames.device, dtype=torch.float32)
         if phase in {PHASE_RECONSTRUCTION_PRETRAIN, PHASE_JOINT_TRAINING}:
-            recon_l1_loss = F.l1_loss(reconstructed_frames, frames)
-            recon_mse_loss = F.mse_loss(reconstructed_frames, frames)
-            recon_ssim_loss = _ssim_loss(reconstructed_frames, frames)
-            recon_edge_loss = _gradient_edge_loss(reconstructed_frames, frames)
+            recon_l1_loss = F.l1_loss(reconstructed_frames, frames_fp32)
+            recon_mse_loss = F.mse_loss(reconstructed_frames, frames_fp32)
+            recon_ssim_loss = _ssim_loss(reconstructed_frames, frames_fp32)
+            recon_edge_loss = _gradient_edge_loss(reconstructed_frames, frames_fp32)
 
-        detection_logit_loss = torch.zeros((), device=frames.device)
-        detection_box_loss = torch.zeros((), device=frames.device)
+        detection_logit_loss = torch.zeros((), device=frames.device, dtype=torch.float32)
+        detection_box_loss = torch.zeros((), device=frames.device, dtype=torch.float32)
         if (
             phase == PHASE_JOINT_TRAINING
             and teacher_outputs is not None
@@ -443,8 +471,14 @@ class Stage1Trainer:
         ):
             student_bundle = _sequences_to_bundle(model_outputs.detection_sequences, teacher_bundle)
             student_outputs = self.baseline.forward_from_encoder_feature_bundle(detector_inputs, student_bundle)
-            detection_logit_loss = F.mse_loss(student_outputs.logits, teacher_outputs.logits.detach())
-            detection_box_loss = F.l1_loss(student_outputs.pred_boxes, teacher_outputs.pred_boxes.detach())
+            detection_logit_loss = F.mse_loss(
+                student_outputs.logits.float(),
+                teacher_outputs.logits.detach().float(),
+            )
+            detection_box_loss = F.l1_loss(
+                student_outputs.pred_boxes.float(),
+                teacher_outputs.pred_boxes.detach().float(),
+            )
 
         total_loss = (
             self.config.loss.feature_loss_weight * feature_loss
