@@ -253,6 +253,16 @@ python scripts/train_mdvsc_stage1.py \
   --data /absolute/path/to/ILSVRC/Data/VID/train
 ```
 
+如果你要用 3 张 4090 训练，直接用 `torchrun`：
+
+```bash
+torchrun --nproc_per_node=3 scripts/train_mdvsc_stage1.py \
+  --config configs/mdvsc_stage1_imagenet_vid_subset.yaml \
+  --data /absolute/path/to/ILSVRC/Data/VID/train
+```
+
+当前训练器已经支持 DDP。这里的 `optimization.batch_size` 表示单卡 batch size，所以如果 YAML 里写的是 2，那么 3 卡训练时全局 batch size 就是 6。
+
 如果你想换输出目录：
 
 ```bash

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import random
 from collections import defaultdict
 from pathlib import Path
@@ -8,10 +9,13 @@ from typing import Any
 
 import numpy as np
 import torch
+import torch.distributed as dist
 import torch.nn.functional as F
+from torch.nn.parallel import DistributedDataParallel
 from torch.nn.utils import clip_grad_norm_
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
 from torch.utils.data import DataLoader, Subset
+from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
 from src.semantic_rtdetr.contracts import EncoderFeatureBundle
@@ -114,18 +118,51 @@ def _gradient_edge_loss(prediction: torch.Tensor, target: torch.Tensor) -> torch
     return F.l1_loss(prediction_dx, target_dx) + F.l1_loss(prediction_dy, target_dy)
 
 
+def _world_size_from_env() -> int:
+    return max(1, int(os.environ.get("WORLD_SIZE", "1")))
+
+
+def _rank_from_env() -> int:
+    return int(os.environ.get("RANK", "0"))
+
+
+def _local_rank_from_env() -> int:
+    return int(os.environ.get("LOCAL_RANK", "0"))
+
+
 class Stage1Trainer:
     def __init__(self, config: MDVSCStage1TrainConfig):
         self.config = config
+        self.world_size = _world_size_from_env()
+        self.rank = _rank_from_env()
+        self.local_rank = _local_rank_from_env()
+        self.is_distributed = self.world_size > 1
+        self.is_main_process = self.rank == 0
+        self.train_sampler: DistributedSampler | None = None
+        self.val_sampler: DistributedSampler | None = None
+
+        if self.is_distributed:
+            if not torch.cuda.is_available():
+                raise RuntimeError("Distributed stage-1 training requires CUDA devices")
+            torch.cuda.set_device(self.local_rank)
+            if not dist.is_initialized():
+                dist.init_process_group(backend="nccl")
+
         self.output_dir = Path(config.output.output_dir)
-        self.output_dir.mkdir(parents=True, exist_ok=True)
+        if self.is_main_process:
+            self.output_dir.mkdir(parents=True, exist_ok=True)
         _set_seed(config.optimization.seed)
 
-        print("[stage1] Loading RT-DETR teacher", flush=True)
+        self._log(
+            "[stage1] Loading RT-DETR teacher"
+            + (f" with DDP world_size={self.world_size}, local_rank={self.local_rank}" if self.is_distributed else "")
+        )
+
+        detector_device = f"cuda:{self.local_rank}" if self.is_distributed else config.detector.device
 
         self.baseline = RTDetrBaseline(
             config.detector.hf_name,
-            device=config.detector.device,
+            device=detector_device,
             local_path=config.detector.local_path,
             cache_dir=config.detector.cache_dir,
         )
@@ -133,7 +170,7 @@ class Stage1Trainer:
             parameter.requires_grad = False
         self.baseline.model.eval()
 
-        self.model = ProjectMDVSC(
+        self.model_module = ProjectMDVSC(
             feature_channels=config.mdvsc.feature_channels,
             latent_dims=config.mdvsc.latent_dims,
             common_keep_ratios=config.mdvsc.common_keep_ratios,
@@ -142,9 +179,17 @@ class Stage1Trainer:
             reconstruction_hidden_channels=config.mdvsc.reconstruction_hidden_channels,
             reconstruction_detail_channels=config.mdvsc.reconstruction_detail_channels,
         ).to(self.baseline.device)
+        if self.is_distributed:
+            self.model = DistributedDataParallel(
+                self.model_module,
+                device_ids=[self.local_rank],
+                output_device=self.local_rank,
+            )
+        else:
+            self.model = self.model_module
         self.optimizer, self.scheduler = self._build_phase_optimizer(PHASE_JOINT_TRAINING)
 
-        print("[stage1] Building train/val datasets", flush=True)
+        self._log("[stage1] Building train/val datasets")
         train_dataset, val_dataset = build_train_val_datasets(config.data, seed=config.optimization.seed)
         self.dataset_info = {
             "dataset_name": config.data.dataset_name,
@@ -152,39 +197,62 @@ class Stage1Trainer:
             "val_num_samples": len(val_dataset) if val_dataset is not None else 0,
             "train_source_path": config.data.train_source_path,
             "val_source_path": config.data.val_source_path,
+            "world_size": self.world_size,
+            "batch_size_per_device": config.optimization.batch_size,
+            "global_batch_size": config.optimization.batch_size * self.world_size,
             "train_dataset": _dataset_summary(train_dataset),
             "val_dataset": _dataset_summary(val_dataset) if val_dataset is not None else None,
         }
-        print(
+        self._log(
             f"[stage1] Dataset ready: train={self.dataset_info['train_num_samples']} samples, "
             f"val={self.dataset_info['val_num_samples']} samples",
-            flush=True,
         )
         pin_memory = self.baseline.device.type == "cuda"
+        if self.is_distributed:
+            self.train_sampler = DistributedSampler(
+                train_dataset,
+                num_replicas=self.world_size,
+                rank=self.rank,
+                shuffle=True,
+            )
         self.train_loader = DataLoader(
             train_dataset,
             batch_size=config.optimization.batch_size,
-            shuffle=True,
+            shuffle=self.train_sampler is None,
+            sampler=self.train_sampler,
             num_workers=config.optimization.num_workers,
             pin_memory=pin_memory,
         )
         self.val_loader = None
         if val_dataset is not None:
+            if self.is_distributed:
+                self.val_sampler = DistributedSampler(
+                    val_dataset,
+                    num_replicas=self.world_size,
+                    rank=self.rank,
+                    shuffle=False,
+                )
             self.val_loader = DataLoader(
                 val_dataset,
                 batch_size=config.optimization.batch_size,
                 shuffle=False,
+                sampler=self.val_sampler,
                 num_workers=config.optimization.num_workers,
                 pin_memory=pin_memory,
             )
-        print("[stage1] DataLoader initialization complete", flush=True)
+        self._log("[stage1] DataLoader initialization complete")
+
+    def _log(self, message: str) -> None:
+        if self.is_main_process:
+            print(message, flush=True)
 
     def run(self) -> dict[str, Any]:
         metrics_path = self.output_dir / "metrics.jsonl"
         config_path = self.output_dir / "resolved_config.json"
         dataset_info_path = self.output_dir / "dataset_info.json"
-        config_path.write_text(json.dumps(self.config.to_dict(), indent=2), encoding="utf-8")
-        dataset_info_path.write_text(json.dumps(self.dataset_info, indent=2), encoding="utf-8")
+        if self.is_main_process:
+            config_path.write_text(json.dumps(self.config.to_dict(), indent=2), encoding="utf-8")
+            dataset_info_path.write_text(json.dumps(self.dataset_info, indent=2), encoding="utf-8")
 
         best_val_loss: float | None = None
         last_summary: dict[str, Any] | None = None
@@ -200,19 +268,22 @@ class Stage1Trainer:
         for phase_name, phase_epochs in phase_sequence:
             self.optimizer, self.scheduler = self._build_phase_optimizer(phase_name)
             if phase_name == PHASE_RECONSTRUCTION_PRETRAIN:
-                print("[stage1] Starting reconstruction-head pretraining with frozen RT-DETR teacher", flush=True)
+                self._log("[stage1] Starting reconstruction-head pretraining with frozen RT-DETR teacher")
             elif phase_name == PHASE_MDVSC_BOOTSTRAP:
-                print("[stage1] Starting MDVSC bootstrap with frozen reconstruction head", flush=True)
+                self._log("[stage1] Starting MDVSC bootstrap with frozen reconstruction head")
             else:
-                print("[stage1] Starting joint MDVSC + reconstruction training", flush=True)
+                self._log("[stage1] Starting joint MDVSC + reconstruction training")
 
             for phase_epoch in range(1, phase_epochs + 1):
                 global_epoch += 1
-                print(
+                self._log(
                     f"[stage1] Starting {phase_name} epoch {phase_epoch}/{phase_epochs} "
                     f"(global {global_epoch})",
-                    flush=True,
                 )
+                if self.train_sampler is not None:
+                    self.train_sampler.set_epoch(global_epoch)
+                if self.val_sampler is not None:
+                    self.val_sampler.set_epoch(global_epoch)
                 train_metrics = self._run_epoch(
                     self.train_loader,
                     training=True,
@@ -239,8 +310,9 @@ class Stage1Trainer:
                     "val": val_metrics,
                     "lr": float(self.optimizer.param_groups[0]["lr"]),
                 }
-                with metrics_path.open("a", encoding="utf-8") as handle:
-                    handle.write(json.dumps(summary, ensure_ascii=False) + "\n")
+                if self.is_main_process:
+                    with metrics_path.open("a", encoding="utf-8") as handle:
+                        handle.write(json.dumps(summary, ensure_ascii=False) + "\n")
 
                 current_val = val_metrics["total_loss"] if val_metrics is not None else train_metrics["total_loss"]
                 if phase_name == tracked_best_phase and (best_val_loss is None or current_val < best_val_loss):
@@ -261,10 +333,11 @@ class Stage1Trainer:
             "joint_training_epochs": self.config.optimization.epochs,
             "last_epoch": last_summary,
         }
-        (self.output_dir / "final_summary.json").write_text(
-            json.dumps(final_summary, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
+        if self.is_main_process:
+            (self.output_dir / "final_summary.json").write_text(
+                json.dumps(final_summary, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
         return final_summary
 
     def _run_epoch(self, dataloader: DataLoader, training: bool, epoch: int, phase: str) -> dict[str, float]:
@@ -272,7 +345,12 @@ class Stage1Trainer:
         metric_sums: defaultdict[str, float] = defaultdict(float)
         max_steps = self.config.optimization.max_steps_per_epoch
         steps = 0
-        progress = tqdm(dataloader, desc=f"epoch {epoch} {phase} {'train' if training else 'val'}", leave=False)
+        progress = tqdm(
+            dataloader,
+            desc=f"epoch {epoch} {phase} {'train' if training else 'val'}",
+            leave=False,
+            disable=not self.is_main_process,
+        )
 
         for batch_index, frames in enumerate(progress, start=1):
             if max_steps is not None and batch_index > max_steps:
@@ -295,19 +373,14 @@ class Stage1Trainer:
                 self.optimizer.zero_grad(set_to_none=True)
 
             target_sequences = _bundle_to_sequences(teacher_bundle, batch_size, time_steps)
-            if phase == PHASE_RECONSTRUCTION_PRETRAIN:
-                model_outputs = self.model.reconstruct_from_feature_sequences(
-                    target_sequences,
-                    output_size=(height, width),
-                )
-            else:
-                model_outputs = self.model(
-                    target_sequences,
-                    output_size=(height, width),
-                    apply_masks=self.config.mdvsc.apply_masks,
-                    channel_mode=self.config.mdvsc.channel_mode,
-                    snr_db=self.config.mdvsc.snr_db,
-                )
+            model_outputs = self.model(
+                target_sequences,
+                output_size=(height, width),
+                apply_masks=self.config.mdvsc.apply_masks,
+                channel_mode=self.config.mdvsc.channel_mode,
+                snr_db=self.config.mdvsc.snr_db,
+                bypass_mdvsc=phase == PHASE_RECONSTRUCTION_PRETRAIN,
+            )
             loss_dict = self._compute_losses(
                 frames=frames,
                 target_sequences=target_sequences,
@@ -350,6 +423,29 @@ class Stage1Trainer:
 
         if steps == 0:
             raise ValueError("No batches were processed in the current epoch")
+
+        if self.is_distributed:
+            metric_names = [
+                "total",
+                "feature",
+                "recon_l1",
+                "recon_mse",
+                "recon_ssim",
+                "recon_edge",
+                "detection_logit",
+                "detection_box",
+                "common_active_ratio",
+                "individual_active_ratio",
+            ]
+            reduced = torch.tensor(
+                [metric_sums[name] for name in metric_names] + [float(steps)],
+                device=self.baseline.device,
+                dtype=torch.float64,
+            )
+            dist.all_reduce(reduced, op=dist.ReduceOp.SUM)
+            steps = max(int(round(reduced[-1].item())), 1)
+            for name, value in zip(metric_names, reduced[:-1].tolist()):
+                metric_sums[name] = float(value)
 
         return {
             "total_loss": metric_sums["total"] / steps,
@@ -430,15 +526,15 @@ class Stage1Trainer:
     def _build_phase_optimizer(self, phase: str):
         if phase == PHASE_RECONSTRUCTION_PRETRAIN:
             self._set_phase_trainability(phase)
-            parameters = [parameter for parameter in self.model.parameters() if parameter.requires_grad]
+            parameters = [parameter for parameter in self.model_module.parameters() if parameter.requires_grad]
             lr = self.config.optimization.reconstruction_pretrain_lr
         elif phase == PHASE_MDVSC_BOOTSTRAP:
             self._set_phase_trainability(phase)
-            parameters = [parameter for parameter in self.model.parameters() if parameter.requires_grad]
+            parameters = [parameter for parameter in self.model_module.parameters() if parameter.requires_grad]
             lr = self.config.optimization.mdvsc_bootstrap_lr
         else:
             self._set_phase_trainability(phase)
-            parameters = [parameter for parameter in self.model.parameters() if parameter.requires_grad]
+            parameters = [parameter for parameter in self.model_module.parameters() if parameter.requires_grad]
             lr = self.config.optimization.lr
 
         optimizer = torch.optim.AdamW(
@@ -456,21 +552,25 @@ class Stage1Trainer:
     def _set_phase_trainability(self, phase: str) -> None:
         reconstruction_trainable = phase in {PHASE_RECONSTRUCTION_PRETRAIN, PHASE_JOINT_TRAINING}
         mdvsc_trainable = phase in {PHASE_MDVSC_BOOTSTRAP, PHASE_JOINT_TRAINING}
-        detection_adaptation_trainable = phase == PHASE_JOINT_TRAINING
+        detection_adaptation_trainable = phase == PHASE_JOINT_TRAINING and (
+            self.config.loss.detection_logit_weight > 0.0 or self.config.loss.detection_box_weight > 0.0
+        )
 
-        for parameter in self.model.reconstruction_head.parameters():
+        for parameter in self.model_module.reconstruction_head.parameters():
             parameter.requires_grad = reconstruction_trainable
-        for parameter in self.model.reconstruction_refinement_heads.parameters():
+        for parameter in self.model_module.reconstruction_refinement_heads.parameters():
             parameter.requires_grad = reconstruction_trainable
-        for parameter in self.model.detection_refinement_heads.parameters():
+        for parameter in self.model_module.detection_refinement_heads.parameters():
             parameter.requires_grad = detection_adaptation_trainable
-        for parameter in self.model.level_modules.parameters():
+        for parameter in self.model_module.level_modules.parameters():
             parameter.requires_grad = mdvsc_trainable
 
     def _save_checkpoint(self, file_name: str, epoch: int, summary: dict[str, Any]) -> None:
+        if not self.is_main_process:
+            return
         checkpoint = {
             "epoch": epoch,
-            "model_state": self.model.state_dict(),
+            "model_state": self.model_module.state_dict(),
             "optimizer_state": self.optimizer.state_dict(),
             "scheduler_state": self.scheduler.state_dict() if self.scheduler is not None else None,
             "config": self.config.to_dict(),
@@ -506,10 +606,17 @@ class Stage1Trainer:
         return SequentialLR(optimizer, schedulers=[warmup, cosine], milestones=[warmup_epochs])
 
     def _should_save_visualizations(self, epoch: int) -> bool:
+        if not self.is_main_process:
+            return False
         if not self.config.output.save_visualizations:
             return False
         every = max(self.config.output.visualization_every_epochs, 1)
         return epoch % every == 0
+
+    def close(self) -> None:
+        if self.is_distributed and dist.is_initialized():
+            dist.barrier()
+            dist.destroy_process_group()
 
     def _save_visualizations(
         self,
@@ -591,4 +698,7 @@ class Stage1Trainer:
 
 def run_stage1_training(config: MDVSCStage1TrainConfig) -> dict[str, Any]:
     trainer = Stage1Trainer(config)
-    return trainer.run()
+    try:
+        return trainer.run()
+    finally:
+        trainer.close()

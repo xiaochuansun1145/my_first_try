@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -23,6 +24,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--data", help="Override data.train_source_path in the YAML config.")
     parser.add_argument("--output", help="Override output.output_dir in the YAML config.")
+    parser.add_argument("--local-rank", type=int, default=int(os.environ.get("LOCAL_RANK", "0")), help=argparse.SUPPRESS)
     return parser.parse_args()
 
 
@@ -36,7 +38,8 @@ def main() -> None:
         config = replace(config, output=replace(config.output, output_dir=args.output))
 
     summary = run_stage1_training(config)
-    print(json.dumps(summary, indent=2, ensure_ascii=False))
+    if int(os.environ.get("RANK", "0")) == 0:
+        print(json.dumps(summary, indent=2, ensure_ascii=False))
 
 
 if __name__ == "__main__":

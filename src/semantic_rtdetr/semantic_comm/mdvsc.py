@@ -526,7 +526,11 @@ class ProjectMDVSC(nn.Module):
         apply_masks: bool = True,
         channel_mode: str = "identity",
         snr_db: float | None = None,
+        bypass_mdvsc: bool = False,
     ) -> MDVSCOutput:
+        if bypass_mdvsc:
+            return self.reconstruct_from_feature_sequences(feature_sequences, output_size=output_size)
+
         if len(feature_sequences) != len(self.level_modules):
             raise ValueError("feature_sequences must match the configured number of levels")
 
