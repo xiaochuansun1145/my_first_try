@@ -178,7 +178,8 @@ data:
 - `optimization.mdvsc_bootstrap_lr`：MDVSC bootstrap 阶段的学习率。
 - `optimization.epochs`：训练轮数。
 - `optimization.lr`：学习率。
-- `optimization.scheduler`：当前支持 `constant` 和 `cosine`。
+- `optimization.optimizer`：当前支持 `adamw` 和 `adam`。
+- `optimization.scheduler`：当前支持 `constant`、`cosine` 和 `onecycle`；当前默认推荐 `onecycle`。
 - `optimization.warmup_epochs`：warmup 轮数。
 - `optimization.max_steps_per_epoch`：可选，用于限制每个 epoch 最多跑多少 step。
 
@@ -189,11 +190,12 @@ data:
 - 当前第一阶段默认保持 RT-DETR 冻结，包括 reconstruction head 预训练、MDVSC bootstrap 和联合训练阶段都不解冻 teacher。
 - `mdvsc.apply_masks`：当前建议保持 `true`。
 - `mdvsc.channel_mode`：第一阶段建议先用 `identity`。
-- `mdvsc.latent_dims`：当前默认是 48 / 64 / 96。
+- `mdvsc.latent_dims`：当前默认下调到 32 / 48 / 64。
 - `mdvsc.common_keep_ratios`：当前默认是 0.5 / 0.625 / 0.75。
 - `mdvsc.individual_keep_ratios`：当前默认是 0.125 / 0.1875 / 0.25。
-- `mdvsc.reconstruction_hidden_channels`：语义主干解码宽度，当前推荐默认 256。
-- `mdvsc.reconstruction_detail_channels`：最高分辨率细节分支宽度，当前推荐默认 128。
+- `mdvsc.reconstruction_hidden_channels`：语义主干解码宽度，当前推荐默认 160。
+- `mdvsc.reconstruction_detail_channels`：最高分辨率细节分支宽度，当前推荐默认 64。
+- 当前公共分支和个体分支都改成了“逐通道的 block mask”，不再是公共按通道、个体按空间平均 block 的混合策略。
 - 当前 restored feature 会先经过 shared trunk，再分别进入 detection refinement 和 reconstruction refinement 两条轻分支。
 
 ### 损失相关
@@ -235,8 +237,10 @@ optimization:
   mdvsc_bootstrap_lr: 1.0e-4
   epochs: 10
   lr: 1.0e-4
+  optimizer: adamw
   use_amp: true
   amp_dtype: float16
+  scheduler: onecycle
 
 loss:
   recon_l1_weight: 1.0
@@ -247,7 +251,38 @@ loss:
 
 ## 八、怎么启动训练
 
-最推荐命令：
+当前推荐把三个训练阶段拆开执行。
+
+第一阶段，只训练重建支路：
+
+```bash
+python scripts/train_mdvsc_stage1_reconstruction.py \
+  --config configs/mdvsc_stage1_imagenet_vid_subset.yaml \
+  --data /absolute/path/to/ILSVRC/Data/VID/train \
+  --output outputs/stage1_reconstruction
+```
+
+第二阶段，只训练传输与特征恢复支路：
+
+```bash
+python scripts/train_mdvsc_stage1_transmission.py \
+  --config configs/mdvsc_stage1_imagenet_vid_subset.yaml \
+  --data /absolute/path/to/ILSVRC/Data/VID/train \
+  --output outputs/stage1_transmission
+```
+
+第三阶段，把前两个阶段的最优 checkpoint 组装起来做联调：
+
+```bash
+python scripts/train_mdvsc_stage1_joint.py \
+  --config configs/mdvsc_stage1_imagenet_vid_subset.yaml \
+  --data /absolute/path/to/ILSVRC/Data/VID/train \
+  --output outputs/stage1_joint \
+  --reconstruction-checkpoint outputs/stage1_reconstruction/best.pt \
+  --transmission-checkpoint outputs/stage1_transmission/best.pt
+```
+
+如果你仍然想沿用原来的单入口，也可以继续使用：
 
 ```bash
 python scripts/download_rtdetr_weights.py
@@ -257,13 +292,13 @@ python scripts/train_mdvsc_stage1.py \
   --data /absolute/path/to/ILSVRC/Data/VID/train
 ```
 
-如果你想换输出目录：
+如果你想把三阶段曲线汇总到一起看：
 
 ```bash
-python scripts/train_mdvsc_stage1.py \
-  --config configs/mdvsc_stage1_imagenet_vid_subset.yaml \
-  --data /absolute/path/to/ILSVRC/Data/VID/train \
-  --output outputs/mdvsc_stage1_imagenet_vid_run01
+python scripts/plot_stage1_phase_metrics.py \
+  --reconstruction-dir outputs/stage1_reconstruction \
+  --transmission-dir outputs/stage1_transmission \
+  --joint-dir outputs/stage1_joint
 ```
 
 如果你怀疑 AMP 带来了数值不稳定，可以先把 YAML 里的下面两项改掉再复现：

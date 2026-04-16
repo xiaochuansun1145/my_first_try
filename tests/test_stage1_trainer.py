@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
 import unittest
 
 import numpy as np
 import torch
+from torch.optim import AdamW
+from torch.optim.lr_scheduler import OneCycleLR
 
 from src.semantic_rtdetr.training.stage1_trainer import (
+    PHASE_JOINT_TRAINING,
+    PHASE_MDVSC_BOOTSTRAP,
+    PHASE_RECONSTRUCTION_PRETRAIN,
+    Stage1Trainer,
     _ensure_finite_tensor,
     _gradient_edge_loss,
     _resolve_amp_dtype,
@@ -58,6 +65,55 @@ class Stage1TrainerUtilityTest(unittest.TestCase):
     def test_ensure_finite_tensor_rejects_nan(self) -> None:
         with self.assertRaises(ValueError):
             _ensure_finite_tensor("nan_tensor", torch.tensor([1.0, float("nan")]))
+
+    def test_phase_epochs_return_configured_values(self) -> None:
+        trainer = Stage1Trainer.__new__(Stage1Trainer)
+        trainer.config = SimpleNamespace(
+            optimization=SimpleNamespace(
+                reconstruction_pretrain_epochs=3,
+                mdvsc_bootstrap_epochs=5,
+                epochs=7,
+            )
+        )
+
+        self.assertEqual(trainer._phase_epochs(PHASE_RECONSTRUCTION_PRETRAIN), 3)
+        self.assertEqual(trainer._phase_epochs(PHASE_MDVSC_BOOTSTRAP), 5)
+        self.assertEqual(trainer._phase_epochs(PHASE_JOINT_TRAINING), 7)
+
+    def test_steps_per_epoch_honors_max_steps(self) -> None:
+        trainer = Stage1Trainer.__new__(Stage1Trainer)
+        trainer.config = SimpleNamespace(optimization=SimpleNamespace(max_steps_per_epoch=3))
+
+        self.assertEqual(trainer._steps_per_epoch([1, 2, 3, 4, 5]), 3)
+
+        trainer.config = SimpleNamespace(optimization=SimpleNamespace(max_steps_per_epoch=None))
+        self.assertEqual(trainer._steps_per_epoch([1, 2, 3, 4, 5]), 5)
+
+    def test_build_scheduler_returns_onecycle_per_batch_flag(self) -> None:
+        trainer = Stage1Trainer.__new__(Stage1Trainer)
+        trainer.config = SimpleNamespace(
+            optimization=SimpleNamespace(
+                scheduler="onecycle",
+                onecycle_pct_start=0.2,
+                onecycle_div_factor=10.0,
+                onecycle_final_div_factor=100.0,
+                warmup_epochs=0,
+                warmup_start_factor=0.2,
+                min_lr_ratio=0.1,
+            )
+        )
+        parameter = torch.nn.Parameter(torch.tensor(1.0))
+        optimizer = AdamW([parameter], lr=1.0e-3)
+
+        scheduler, per_batch = trainer._build_scheduler(
+            optimizer=optimizer,
+            epochs=4,
+            steps_per_epoch=6,
+            max_lr=1.0e-3,
+        )
+
+        self.assertIsInstance(scheduler, OneCycleLR)
+        self.assertTrue(per_batch)
 
 
 if __name__ == "__main__":

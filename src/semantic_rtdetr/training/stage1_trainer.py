@@ -10,7 +10,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch.nn.utils import clip_grad_norm_
-from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
+from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, OneCycleLR, SequentialLR
 from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
 
@@ -170,6 +170,8 @@ class Stage1Trainer:
             reconstruction_hidden_channels=config.mdvsc.reconstruction_hidden_channels,
             reconstruction_detail_channels=config.mdvsc.reconstruction_detail_channels,
         ).to(self.baseline.device)
+        self._load_initialization()
+        self.parameter_counts = self._summarize_parameter_counts()
         self.amp_dtype = _resolve_amp_dtype(config.optimization.amp_dtype)
         self.amp_enabled = bool(config.optimization.use_amp and self.baseline.device.type == "cuda")
         self.scaler_enabled = bool(self.amp_enabled and self.amp_dtype == torch.float16)
@@ -182,7 +184,9 @@ class Stage1Trainer:
                 f"(grad_scaler={'on' if self.scaler_enabled else 'off'})",
                 flush=True,
             )
-        self.optimizer, self.scheduler = self._build_phase_optimizer(PHASE_JOINT_TRAINING)
+        self.optimizer = None
+        self.scheduler = None
+        self.scheduler_step_per_batch = False
 
         print("[stage1] Building train/val datasets", flush=True)
         train_dataset, val_dataset = build_train_val_datasets(config.data, seed=config.optimization.seed)
@@ -234,11 +238,19 @@ class Stage1Trainer:
             phase_sequence.append((PHASE_RECONSTRUCTION_PRETRAIN, self.config.optimization.reconstruction_pretrain_epochs))
         if self.config.optimization.mdvsc_bootstrap_epochs > 0:
             phase_sequence.append((PHASE_MDVSC_BOOTSTRAP, self.config.optimization.mdvsc_bootstrap_epochs))
-        phase_sequence.append((PHASE_JOINT_TRAINING, self.config.optimization.epochs))
+        if self.config.optimization.epochs > 0:
+            phase_sequence.append((PHASE_JOINT_TRAINING, self.config.optimization.epochs))
+        if not phase_sequence:
+            raise ValueError("At least one stage must have a positive epoch count")
+
         tracked_best_phase = PHASE_JOINT_TRAINING if self.config.optimization.epochs > 0 else phase_sequence[-1][0]
+        train_steps_per_epoch = self._steps_per_epoch(self.train_loader)
 
         for phase_name, phase_epochs in phase_sequence:
-            self.optimizer, self.scheduler = self._build_phase_optimizer(phase_name)
+            self.optimizer, self.scheduler, self.scheduler_step_per_batch = self._build_phase_optimizer(
+                phase=phase_name,
+                steps_per_epoch=train_steps_per_epoch,
+            )
             if phase_name == PHASE_RECONSTRUCTION_PRETRAIN:
                 print("[stage1] Starting reconstruction-head pretraining with frozen RT-DETR teacher", flush=True)
             elif phase_name == PHASE_MDVSC_BOOTSTRAP:
@@ -268,7 +280,7 @@ class Stage1Trainer:
                         phase=phase_name,
                     )
 
-                if self.scheduler is not None:
+                if self.scheduler is not None and not self.scheduler_step_per_batch:
                     self.scheduler.step()
 
                 summary = {
@@ -301,6 +313,8 @@ class Stage1Trainer:
             "reconstruction_pretrain_epochs": self.config.optimization.reconstruction_pretrain_epochs,
             "mdvsc_bootstrap_epochs": self.config.optimization.mdvsc_bootstrap_epochs,
             "joint_training_epochs": self.config.optimization.epochs,
+            "parameter_counts": self.parameter_counts,
+            "phase_sequence": [{"phase": phase_name, "epochs": epochs} for phase_name, epochs in phase_sequence],
             "last_epoch": last_summary,
         }
         (self.output_dir / "final_summary.json").write_text(
@@ -387,6 +401,8 @@ class Stage1Trainer:
                     self.grad_scaler.update()
                 else:
                     self.optimizer.step()
+                if self.scheduler is not None and self.scheduler_step_per_batch:
+                    self.scheduler.step()
 
             detached = {name: float(value.detach().item()) for name, value in loss_dict.items()}
             for name, value in detached.items():
@@ -501,7 +517,7 @@ class Stage1Trainer:
             "detection_box": detection_box_loss,
         }
 
-    def _build_phase_optimizer(self, phase: str):
+    def _build_phase_optimizer(self, phase: str, steps_per_epoch: int):
         if phase == PHASE_RECONSTRUCTION_PRETRAIN:
             self._set_phase_trainability(phase)
             parameters = [parameter for parameter in self.model.parameters() if parameter.requires_grad]
@@ -515,17 +531,37 @@ class Stage1Trainer:
             parameters = [parameter for parameter in self.model.parameters() if parameter.requires_grad]
             lr = self.config.optimization.lr
 
-        optimizer = torch.optim.AdamW(
-            parameters,
-            lr=lr,
-            weight_decay=self.config.optimization.weight_decay,
+        if not parameters:
+            raise ValueError(f"No trainable parameters found for phase: {phase}")
+
+        optimizer = self._build_optimizer(parameters=parameters, lr=lr)
+        phase_epochs = self._phase_epochs(phase)
+        scheduler, scheduler_step_per_batch = self._build_scheduler(
+            optimizer=optimizer,
+            epochs=phase_epochs,
+            steps_per_epoch=steps_per_epoch,
+            max_lr=lr,
         )
-        if phase == PHASE_RECONSTRUCTION_PRETRAIN:
-            scheduler = None
-        else:
-            phase_epochs = self.config.optimization.mdvsc_bootstrap_epochs if phase == PHASE_MDVSC_BOOTSTRAP else self.config.optimization.epochs
-            scheduler = self._build_scheduler(optimizer=optimizer, epochs=phase_epochs)
-        return optimizer, scheduler
+        return optimizer, scheduler, scheduler_step_per_batch
+
+    def _build_optimizer(self, parameters: list[torch.nn.Parameter], lr: float) -> torch.optim.Optimizer:
+        optimizer_name = self.config.optimization.optimizer.lower()
+        betas = (self.config.optimization.adam_beta1, self.config.optimization.adam_beta2)
+        if optimizer_name == "adamw":
+            return torch.optim.AdamW(
+                parameters,
+                lr=lr,
+                betas=betas,
+                weight_decay=self.config.optimization.weight_decay,
+            )
+        if optimizer_name == "adam":
+            return torch.optim.Adam(
+                parameters,
+                lr=lr,
+                betas=betas,
+                weight_decay=self.config.optimization.weight_decay,
+            )
+        raise ValueError(f"Unsupported optimizer type: {self.config.optimization.optimizer}")
 
     def _set_phase_trainability(self, phase: str) -> None:
         reconstruction_trainable = phase in {PHASE_RECONSTRUCTION_PRETRAIN, PHASE_JOINT_TRAINING}
@@ -553,10 +589,30 @@ class Stage1Trainer:
         }
         torch.save(checkpoint, self.output_dir / file_name)
 
-    def _build_scheduler(self, optimizer: torch.optim.Optimizer, epochs: int):
+    def _build_scheduler(
+        self,
+        optimizer: torch.optim.Optimizer,
+        epochs: int,
+        steps_per_epoch: int,
+        max_lr: float,
+    ) -> tuple[torch.optim.lr_scheduler.LRScheduler | None, bool]:
         scheduler_type = self.config.optimization.scheduler.lower()
         if scheduler_type == "constant":
-            return None
+            return None, False
+        if scheduler_type == "onecycle":
+            return (
+                OneCycleLR(
+                    optimizer,
+                    max_lr=max_lr,
+                    epochs=max(epochs, 1),
+                    steps_per_epoch=max(steps_per_epoch, 1),
+                    pct_start=self.config.optimization.onecycle_pct_start,
+                    div_factor=self.config.optimization.onecycle_div_factor,
+                    final_div_factor=self.config.optimization.onecycle_final_div_factor,
+                    anneal_strategy="cos",
+                ),
+                True,
+            )
         if scheduler_type != "cosine":
             raise ValueError(f"Unsupported scheduler type: {self.config.optimization.scheduler}")
 
@@ -565,7 +621,7 @@ class Stage1Trainer:
         eta_min = float(optimizer.param_groups[0]["lr"]) * self.config.optimization.min_lr_ratio
 
         if warmup_epochs == 0:
-            return CosineAnnealingLR(optimizer, T_max=total_epochs, eta_min=eta_min)
+            return CosineAnnealingLR(optimizer, T_max=total_epochs, eta_min=eta_min), False
 
         warmup = LinearLR(
             optimizer,
@@ -578,7 +634,75 @@ class Stage1Trainer:
             T_max=max(total_epochs - warmup_epochs, 1),
             eta_min=eta_min,
         )
-        return SequentialLR(optimizer, schedulers=[warmup, cosine], milestones=[warmup_epochs])
+        return SequentialLR(optimizer, schedulers=[warmup, cosine], milestones=[warmup_epochs]), False
+
+    def _phase_epochs(self, phase: str) -> int:
+        if phase == PHASE_RECONSTRUCTION_PRETRAIN:
+            return self.config.optimization.reconstruction_pretrain_epochs
+        if phase == PHASE_MDVSC_BOOTSTRAP:
+            return self.config.optimization.mdvsc_bootstrap_epochs
+        return self.config.optimization.epochs
+
+    def _steps_per_epoch(self, dataloader: DataLoader) -> int:
+        if self.config.optimization.max_steps_per_epoch is None:
+            return len(dataloader)
+        return min(len(dataloader), self.config.optimization.max_steps_per_epoch)
+
+    def _summarize_parameter_counts(self) -> dict[str, int]:
+        counts = {
+            "total": sum(parameter.numel() for parameter in self.model.parameters()),
+            "level_modules": sum(parameter.numel() for parameter in self.model.level_modules.parameters()),
+            "reconstruction_head": sum(parameter.numel() for parameter in self.model.reconstruction_head.parameters()),
+            "detection_refinement_heads": sum(
+                parameter.numel() for parameter in self.model.detection_refinement_heads.parameters()
+            ),
+            "reconstruction_refinement_heads": sum(
+                parameter.numel() for parameter in self.model.reconstruction_refinement_heads.parameters()
+            ),
+        }
+        counts["trainable_at_init"] = sum(parameter.numel() for parameter in self.model.parameters() if parameter.requires_grad)
+        return counts
+
+    def _load_initialization(self) -> None:
+        initialization = self.config.initialization
+        if initialization.full_checkpoint:
+            state_dict = self._load_model_state(initialization.full_checkpoint)
+            self.model.load_state_dict(state_dict, strict=initialization.strict)
+        if initialization.reconstruction_checkpoint:
+            self._load_component_checkpoint(
+                checkpoint_path=initialization.reconstruction_checkpoint,
+                prefixes=["reconstruction_head.", "reconstruction_refinement_heads."],
+                strict=initialization.strict,
+            )
+        if initialization.transmission_checkpoint:
+            self._load_component_checkpoint(
+                checkpoint_path=initialization.transmission_checkpoint,
+                prefixes=["level_modules."],
+                strict=initialization.strict,
+            )
+
+    def _load_component_checkpoint(self, checkpoint_path: str, prefixes: list[str], strict: bool) -> None:
+        state_dict = self._load_model_state(checkpoint_path)
+        current_state = self.model.state_dict()
+        filtered_state = {
+            key: value
+            for key, value in state_dict.items()
+            if any(key.startswith(prefix) for prefix in prefixes)
+            and key in current_state
+            and current_state[key].shape == value.shape
+        }
+        if strict and not filtered_state:
+            raise ValueError(f"No matching parameters found when loading {checkpoint_path}")
+        self.model.load_state_dict(filtered_state, strict=False)
+
+    @staticmethod
+    def _load_model_state(checkpoint_path: str) -> dict[str, torch.Tensor]:
+        checkpoint = torch.load(checkpoint_path, map_location="cpu")
+        if isinstance(checkpoint, dict) and "model_state" in checkpoint:
+            return checkpoint["model_state"]
+        if isinstance(checkpoint, dict):
+            return checkpoint
+        raise ValueError(f"Unsupported checkpoint format: {checkpoint_path}")
 
     def _should_save_visualizations(self, epoch: int) -> bool:
         if not self.config.output.save_visualizations:
@@ -656,15 +780,15 @@ class Stage1Trainer:
         if num_levels == 1:
             axes = np.array([axes])
         for level_index in range(num_levels):
-            common_mask = _to_numpy_float_array(model_outputs.common_masks[level_index][0, :, 0, 0])[None, :]
-            individual_mask = _to_numpy_float_array(model_outputs.individual_masks[level_index][0, 0, 0])
-            axes[level_index, 0].imshow(common_mask, cmap="gray", aspect="auto", vmin=0.0, vmax=1.0)
+            common_mask = _to_numpy_float_array(model_outputs.common_masks[level_index][0].mean(dim=0))
+            individual_mask = _to_numpy_float_array(model_outputs.individual_masks[level_index][0, 0].mean(dim=0))
+            axes[level_index, 0].imshow(common_mask, cmap="gray", vmin=0.0, vmax=1.0)
             axes[level_index, 0].set_title(f"level {level_index} common mask")
             axes[level_index, 1].imshow(individual_mask, cmap="gray", vmin=0.0, vmax=1.0)
             axes[level_index, 1].set_title(f"level {level_index} individual mask t=0")
             axes[level_index, 0].set_ylabel(f"level {level_index}")
-            axes[level_index, 0].set_yticks([])
-            axes[level_index, 1].set_yticks([])
+            axes[level_index, 0].axis("off")
+            axes[level_index, 1].axis("off")
         figure.tight_layout()
         figure.savefig(vis_dir / f"epoch_{epoch:03d}_masks.png", dpi=180)
         plt.close(figure)

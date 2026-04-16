@@ -25,12 +25,12 @@ data:
 
 mdvsc:
   feature_channels: [256, 256, 256]
-  latent_dims: [48, 64, 96]
+  latent_dims: [32, 48, 64]
   common_keep_ratios: [0.5, 0.625, 0.75]
   individual_keep_ratios: [0.125, 0.1875, 0.25]
   block_sizes: [8, 4, 2]
-  reconstruction_hidden_channels: 256
-  reconstruction_detail_channels: 128
+  reconstruction_hidden_channels: 160
+  reconstruction_detail_channels: 64
   apply_masks: true
   channel_mode: identity
   snr_db: 20.0
@@ -40,6 +40,7 @@ optimization:
   num_workers: 4
   use_amp: true
   amp_dtype: float16
+  optimizer: adamw
   reconstruction_pretrain_epochs: 10
   reconstruction_pretrain_lr: 2.0e-4
   mdvsc_bootstrap_epochs: 6
@@ -47,10 +48,15 @@ optimization:
   epochs: 10
   lr: 5.0e-5
   weight_decay: 1.0e-4
-  scheduler: cosine
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  scheduler: onecycle
   warmup_epochs: 1
   warmup_start_factor: 0.2
   min_lr_ratio: 0.1
+  onecycle_pct_start: 0.15
+  onecycle_div_factor: 25.0
+  onecycle_final_div_factor: 1000.0
   grad_clip_norm: 1.0
   log_every: 10
   save_every_epochs: 1
@@ -72,3 +78,9 @@ output:
   save_visualizations: true
   visualization_every_epochs: 1
   visualization_num_frames: 4
+
+initialization:
+  full_checkpoint:
+  reconstruction_checkpoint:
+  transmission_checkpoint:
+  strict: false

@@ -7,6 +7,7 @@ RT-DETR 与 MDVSC 联合视频语义传输与目标检测研究项目。
 
 - [docs/project_context.md](docs/project_context.md)：项目公共上下文与当前目标架构。
 - [docs/feature_interface.md](docs/feature_interface.md)：RT-DETR 切点与语义特征接口说明。
+- [docs/model_architecture_training_reference.md](docs/model_architecture_training_reference.md)：模型结构、训练超参数与损失/指标换算总表。
 - [docs/plan.md](docs/plan.md)：项目概要、阶段计划与执行优先级。
 - [docs/stage1_training_manual.md](docs/stage1_training_manual.md)：第一阶段训练中文操作说明书。
 

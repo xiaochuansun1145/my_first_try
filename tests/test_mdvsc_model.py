@@ -77,6 +77,29 @@ class ProjectMDVSCTest(unittest.TestCase):
             self.assertGreaterEqual(stat.individual_active_ratio, 0.0)
             self.assertLessEqual(stat.individual_active_ratio, 1.0)
 
+    def test_masks_use_channelwise_block_layout(self) -> None:
+        model = ProjectMDVSC(
+            feature_channels=[8, 8, 8],
+            latent_dims=[4, 4, 4],
+            common_keep_ratios=[0.5, 0.5, 0.5],
+            individual_keep_ratios=[0.25, 0.25, 0.25],
+            block_sizes=[2, 2, 1],
+        )
+        inputs = [
+            torch.randn(1, 2, 8, 4, 4),
+            torch.randn(1, 2, 8, 2, 2),
+            torch.randn(1, 2, 8, 1, 1),
+        ]
+
+        outputs = model(inputs, output_size=(32, 32), apply_masks=True, channel_mode="identity")
+
+        self.assertEqual(outputs.common_masks[0].shape, (1, 4, 4, 4))
+        self.assertEqual(outputs.individual_masks[0].shape, (1, 2, 4, 4, 4))
+        common_level0 = outputs.common_masks[0][0, 0]
+        individual_level0 = outputs.individual_masks[0][0, 0, 0]
+        self.assertTrue(torch.equal(common_level0[0::2, 0::2], common_level0[1::2, 1::2]))
+        self.assertTrue(torch.equal(individual_level0[0::2, 0::2], individual_level0[1::2, 1::2]))
+
 
 if __name__ == "__main__":
     unittest.main()

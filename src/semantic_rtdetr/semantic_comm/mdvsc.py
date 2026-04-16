@@ -39,15 +39,19 @@ class MDVSCOutput:
 class ResidualBlock(nn.Module):
     def __init__(self, channels: int):
         super().__init__()
-        self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
-        self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
-        self.activation = nn.GELU()
+        hidden_channels = max(channels, channels * 2)
+        groups = _group_count(channels)
+        self.norm = SafeGroupNorm(groups, channels)
+        self.expand = nn.Conv2d(channels, hidden_channels, kernel_size=1)
+        self.depthwise = nn.Conv2d(hidden_channels, hidden_channels, kernel_size=3, padding=1, groups=hidden_channels)
+        self.project = nn.Conv2d(hidden_channels, channels, kernel_size=1)
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         residual = inputs
-        outputs = self.activation(self.conv1(inputs))
-        outputs = self.conv2(outputs)
-        return self.activation(outputs + residual)
+        outputs = self.expand(F.gelu(self.norm(inputs)))
+        outputs = self.depthwise(F.gelu(outputs))
+        outputs = self.project(outputs)
+        return residual + outputs
 
 
 def _group_count(channels: int, preferred_groups: int = 8) -> int:
@@ -57,19 +61,33 @@ def _group_count(channels: int, preferred_groups: int = 8) -> int:
     return 1
 
 
+class SafeGroupNorm(nn.Module):
+    def __init__(self, num_groups: int, num_channels: int):
+        super().__init__()
+        self.norm = nn.GroupNorm(num_groups, num_channels)
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        if inputs.ndim == 4 and inputs.shape[0] * inputs.shape[2] * inputs.shape[3] <= 1:
+            return inputs
+        return self.norm(inputs)
+
+
 class ReconstructionResidualBlock(nn.Module):
     def __init__(self, channels: int):
         super().__init__()
+        hidden_channels = max(channels, channels * 2)
         groups = _group_count(channels)
-        self.norm1 = nn.GroupNorm(groups, channels)
-        self.norm2 = nn.GroupNorm(groups, channels)
-        self.conv1 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
-        self.conv2 = nn.Conv2d(channels, channels, kernel_size=3, padding=1)
+        self.norm1 = SafeGroupNorm(groups, channels)
+        self.norm2 = SafeGroupNorm(_group_count(hidden_channels), hidden_channels)
+        self.conv1 = nn.Conv2d(channels, hidden_channels, kernel_size=1)
+        self.conv2 = nn.Conv2d(hidden_channels, hidden_channels, kernel_size=3, padding=1, groups=hidden_channels)
+        self.conv3 = nn.Conv2d(hidden_channels, channels, kernel_size=1)
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         residual = inputs
         outputs = self.conv1(F.gelu(self.norm1(inputs)))
         outputs = self.conv2(F.gelu(self.norm2(outputs)))
+        outputs = self.conv3(outputs)
         return outputs + residual
 
 
@@ -79,9 +97,8 @@ class FusionBlock(nn.Module):
         groups = _group_count(out_channels)
         self.block = nn.Sequential(
             nn.Conv2d(in_channels, out_channels, kernel_size=1),
-            nn.GroupNorm(groups, out_channels),
+            SafeGroupNorm(groups, out_channels),
             nn.GELU(),
-            ReconstructionResidualBlock(out_channels),
             ReconstructionResidualBlock(out_channels),
         )
 
@@ -92,14 +109,21 @@ class FusionBlock(nn.Module):
 class TaskAdaptationBlock(nn.Module):
     def __init__(self, channels: int):
         super().__init__()
-        groups = _group_count(channels)
+        bottleneck_channels = max(channels // 4, 32)
+        groups = _group_count(bottleneck_channels)
         self.block = nn.Sequential(
-            nn.Conv2d(channels, channels, kernel_size=1),
-            nn.GroupNorm(groups, channels),
+            nn.Conv2d(channels, bottleneck_channels, kernel_size=1),
+            SafeGroupNorm(groups, bottleneck_channels),
             nn.GELU(),
-            ReconstructionResidualBlock(channels),
-            ReconstructionResidualBlock(channels),
-            nn.Conv2d(channels, channels, kernel_size=1),
+            nn.Conv2d(
+                bottleneck_channels,
+                bottleneck_channels,
+                kernel_size=3,
+                padding=1,
+                groups=bottleneck_channels,
+            ),
+            nn.GELU(),
+            nn.Conv2d(bottleneck_channels, channels, kernel_size=1),
         )
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
@@ -110,54 +134,19 @@ class UpsampleRefineBlock(nn.Module):
     def __init__(self, in_channels: int, out_channels: int):
         super().__init__()
         groups = _group_count(out_channels)
-        self.upsample = nn.Sequential(
-            nn.Conv2d(in_channels, out_channels * 4, kernel_size=3, padding=1),
+        self.block = nn.Sequential(
+            nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False),
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
+            SafeGroupNorm(groups, out_channels),
             nn.GELU(),
-            nn.PixelShuffle(2),
-            nn.GroupNorm(groups, out_channels),
-        )
-        self.refine = nn.Sequential(
-            ReconstructionResidualBlock(out_channels),
             ReconstructionResidualBlock(out_channels),
         )
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-        return self.refine(self.upsample(inputs))
+        return self.block(inputs)
 
 
-class ChannelImportanceGate(nn.Module):
-    def __init__(self, keep_ratio: float, temperature: float = 0.1):
-        super().__init__()
-        self.keep_ratio = keep_ratio
-        self.temperature = temperature
-
-    def forward(self, features: torch.Tensor, enabled: bool) -> torch.Tensor:
-        batch_size, channels, _, _ = features.shape
-        if not enabled:
-            return torch.ones((batch_size, channels, 1, 1), device=features.device, dtype=features.dtype)
-
-        scores = features.abs().mean(dim=(2, 3))
-        flat_mask = self._build_topk_mask(scores)
-        return flat_mask.view(batch_size, channels, 1, 1)
-
-    def _build_topk_mask(self, scores: torch.Tensor) -> torch.Tensor:
-        total = scores.shape[1]
-        keep = max(1, min(total, int(round(total * self.keep_ratio))))
-        top_values, top_indices = torch.topk(scores, keep, dim=1)
-        hard_mask = torch.zeros_like(scores)
-        hard_mask.scatter_(1, top_indices, 1.0)
-
-        if not self.training:
-            return hard_mask
-
-        threshold = top_values[:, -1:].detach()
-        soft_mask = torch.sigmoid((scores - threshold) / self.temperature)
-        soft_mask = soft_mask * (keep / soft_mask.sum(dim=1, keepdim=True).clamp_min(1e-6))
-        soft_mask = soft_mask.clamp(0.0, 1.0)
-        return hard_mask.detach() - soft_mask.detach() + soft_mask
-
-
-class BlockImportanceGate(nn.Module):
+class ChannelBlockImportanceGate(nn.Module):
     def __init__(self, keep_ratio: float, block_size: int, temperature: float = 0.1):
         super().__init__()
         self.keep_ratio = keep_ratio
@@ -165,33 +154,38 @@ class BlockImportanceGate(nn.Module):
         self.temperature = temperature
 
     def forward(self, features: torch.Tensor, enabled: bool) -> torch.Tensor:
-        batch_size, _, height, width = features.shape
+        batch_size, channels, height, width = features.shape
         if not enabled:
-            return torch.ones((batch_size, 1, height, width), device=features.device, dtype=features.dtype)
+            return torch.ones((batch_size, channels, height, width), device=features.device, dtype=features.dtype)
 
         pad_height = (self.block_size - (height % self.block_size)) % self.block_size
         pad_width = (self.block_size - (width % self.block_size)) % self.block_size
-        pooled_source = F.pad(features.abs().mean(dim=1, keepdim=True), (0, pad_width, 0, pad_height))
-        pooled = F.avg_pool2d(pooled_source, kernel_size=self.block_size, stride=self.block_size)
-        flat_scores = pooled.flatten(1)
-        flat_mask = self._build_topk_mask(flat_scores)
-        block_mask = flat_mask.view(batch_size, 1, pooled.shape[-2], pooled.shape[-1])
+        pooled_source = F.pad(features.abs(), (0, pad_width, 0, pad_height))
+        pooled = F.avg_pool2d(
+            pooled_source.reshape(batch_size * channels, 1, height + pad_height, width + pad_width),
+            kernel_size=self.block_size,
+            stride=self.block_size,
+        )
+        pooled_height, pooled_width = pooled.shape[-2:]
+        scores = pooled.view(batch_size, channels, pooled_height * pooled_width)
+        flat_mask = self._build_topk_mask(scores)
+        block_mask = flat_mask.view(batch_size, channels, pooled_height, pooled_width)
         full_mask = block_mask.repeat_interleave(self.block_size, dim=2).repeat_interleave(self.block_size, dim=3)
         return full_mask[:, :, :height, :width]
 
     def _build_topk_mask(self, scores: torch.Tensor) -> torch.Tensor:
-        total = scores.shape[1]
+        total = scores.shape[-1]
         keep = max(1, min(total, int(round(total * self.keep_ratio))))
-        top_values, top_indices = torch.topk(scores, keep, dim=1)
+        top_values, top_indices = torch.topk(scores, keep, dim=-1)
         hard_mask = torch.zeros_like(scores)
-        hard_mask.scatter_(1, top_indices, 1.0)
+        hard_mask.scatter_(-1, top_indices, 1.0)
 
         if not self.training:
             return hard_mask
 
-        threshold = top_values[:, -1:].detach()
+        threshold = top_values[..., -1:].detach()
         soft_mask = torch.sigmoid((scores - threshold) / self.temperature)
-        soft_mask = soft_mask * (keep / soft_mask.sum(dim=1, keepdim=True).clamp_min(1e-6))
+        soft_mask = soft_mask * (keep / soft_mask.sum(dim=-1, keepdim=True).clamp_min(1e-6))
         soft_mask = soft_mask.clamp(0.0, 1.0)
         return hard_mask.detach() - soft_mask.detach() + soft_mask
 
@@ -214,27 +208,19 @@ class PerLevelMDVSC(nn.Module):
             nn.GELU(),
             ResidualBlock(latent_dim),
         )
-        self.latent_encoder = nn.Sequential(
-            nn.Conv2d(latent_dim, latent_dim, kernel_size=3, padding=1),
-            nn.GELU(),
-            ResidualBlock(latent_dim),
-        )
+        self.latent_encoder = nn.Sequential(ResidualBlock(latent_dim), nn.Conv2d(latent_dim, latent_dim, kernel_size=3, padding=1))
         self.latent_decoder = nn.Sequential(
             ResidualBlock(latent_dim),
             nn.Conv2d(latent_dim, latent_dim, kernel_size=3, padding=1),
             nn.GELU(),
         )
         self.feature_decoder = nn.Sequential(
-            ResidualBlock(latent_dim),
             nn.Conv2d(latent_dim, in_channels, kernel_size=1),
-        )
-        self.refinement = nn.Sequential(
-            nn.Conv2d(in_channels, in_channels, kernel_size=3, padding=1),
             nn.GELU(),
-            ResidualBlock(in_channels),
         )
-        self.common_gate = ChannelImportanceGate(common_keep_ratio)
-        self.individual_gate = BlockImportanceGate(individual_keep_ratio, block_size)
+        self.refinement = TaskAdaptationBlock(in_channels)
+        self.common_gate = ChannelBlockImportanceGate(common_keep_ratio, block_size)
+        self.individual_gate = ChannelBlockImportanceGate(individual_keep_ratio, block_size)
 
     def forward(
         self,
@@ -302,31 +288,30 @@ class ReconstructionHead(nn.Module):
         if len(feature_channels) != 3:
             raise ValueError("ReconstructionHead expects exactly three feature levels")
 
-        self.level2_semantic_proj = FusionBlock(feature_channels[2], hidden_channels)
-        self.level1_semantic_proj = FusionBlock(feature_channels[1], hidden_channels)
-        self.level0_semantic_proj = FusionBlock(feature_channels[0], hidden_channels)
+        self.top_channels = hidden_channels
+        self.mid_channels = max(hidden_channels // 2, detail_channels)
+        self.low_channels = max(self.mid_channels // 2, detail_channels)
+        self.output_channels = max(detail_channels // 2, 32)
+
+        self.level2_semantic_proj = FusionBlock(feature_channels[2], self.top_channels)
+        self.level1_semantic_proj = FusionBlock(feature_channels[1], self.mid_channels)
+        self.level0_semantic_proj = FusionBlock(feature_channels[0], self.low_channels)
         self.level0_detail_proj = FusionBlock(feature_channels[0], detail_channels)
 
-        self.fuse_16 = FusionBlock(hidden_channels * 2, hidden_channels)
-        self.fuse_8 = FusionBlock(hidden_channels * 2, hidden_channels)
-        self.detail_fuse_8 = FusionBlock(hidden_channels + detail_channels, hidden_channels)
+        self.fuse_16 = FusionBlock(self.top_channels + self.mid_channels, self.mid_channels)
+        self.fuse_8 = FusionBlock(self.mid_channels + self.low_channels, self.low_channels)
+        self.detail_fuse_8 = FusionBlock(self.low_channels + detail_channels, self.low_channels)
 
-        self.up_stage1 = UpsampleRefineBlock(hidden_channels, hidden_channels // 2)
-        self.up_stage2 = UpsampleRefineBlock(hidden_channels // 2, hidden_channels // 4)
-        self.up_stage3 = UpsampleRefineBlock(hidden_channels // 4, hidden_channels // 8)
-        self.output_refinement = nn.Sequential(
-            ReconstructionResidualBlock(hidden_channels // 8),
-            ReconstructionResidualBlock(hidden_channels // 8),
-        )
-        self.high_frequency_refinement = nn.Sequential(
-            ReconstructionResidualBlock(hidden_channels // 8),
-            ReconstructionResidualBlock(hidden_channels // 8),
-        )
+        self.up_stage1 = UpsampleRefineBlock(self.low_channels, self.mid_channels)
+        self.up_stage2 = UpsampleRefineBlock(self.mid_channels, self.low_channels)
+        self.up_stage3 = UpsampleRefineBlock(self.low_channels, self.output_channels)
+        self.output_refinement = ReconstructionResidualBlock(self.output_channels)
+        self.high_frequency_refinement = ReconstructionResidualBlock(self.output_channels)
         self.base_layer = nn.Sequential(
-            nn.Conv2d(hidden_channels // 8, 3, kernel_size=1),
+            nn.Conv2d(self.output_channels, 3, kernel_size=3, padding=1),
             nn.Sigmoid(),
         )
-        self.detail_layer = nn.Conv2d(hidden_channels // 8, 3, kernel_size=3, padding=1)
+        self.detail_layer = nn.Conv2d(self.output_channels, 3, kernel_size=3, padding=1)
 
     def decode_components(
         self,
@@ -360,7 +345,7 @@ class ReconstructionHead(nn.Module):
         decoded = self.output_refinement(decoded)
         base = self.base_layer(decoded)
         high_frequency_features = self.high_frequency_refinement(decoded)
-        high_frequency_residual = 0.1 * torch.tanh(self.detail_layer(high_frequency_features))
+        high_frequency_residual = 0.15 * torch.tanh(self.detail_layer(high_frequency_features))
         reconstructed = (base + high_frequency_residual).clamp(0.0, 1.0)
         return reconstructed, base, high_frequency_residual
 
@@ -485,14 +470,14 @@ class ProjectMDVSC(nn.Module):
             batch_size, time_steps, _channels, height, width = feature_sequence.shape
             common_masks.append(
                 torch.ones(
-                    (batch_size, self.latent_dims[level_index], 1, 1),
+                    (batch_size, self.latent_dims[level_index], height, width),
                     device=feature_sequence.device,
                     dtype=feature_sequence.dtype,
                 )
             )
             individual_masks.append(
                 torch.ones(
-                    (batch_size, time_steps, 1, height, width),
+                    (batch_size, time_steps, self.latent_dims[level_index], height, width),
                     device=feature_sequence.device,
                     dtype=feature_sequence.dtype,
                 )

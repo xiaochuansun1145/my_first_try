@@ -51,13 +51,13 @@ class Stage1DataConfig:
 @dataclass(frozen=True)
 class Stage1MDVSCConfig:
     feature_channels: list[int] = field(default_factory=lambda: [256, 256, 256])
-    latent_dims: list[int] = field(default_factory=lambda: [48, 64, 96])
+    latent_dims: list[int] = field(default_factory=lambda: [32, 48, 64])
     common_keep_ratios: list[float] = field(default_factory=lambda: [0.5, 0.625, 0.75])
     individual_keep_ratios: list[float] = field(default_factory=lambda: [0.125, 0.1875, 0.25])
     block_sizes: list[int] = field(default_factory=lambda: [8, 4, 2])
-    reconstruction_hidden_channels: int = 256
-    reconstruction_detail_channels: int = 128
-    apply_masks: bool = False
+    reconstruction_hidden_channels: int = 160
+    reconstruction_detail_channels: int = 64
+    apply_masks: bool = True
     channel_mode: str = "identity"
     snr_db: float = 20.0
 
@@ -68,6 +68,7 @@ class Stage1OptimizationConfig:
     num_workers: int = 4
     use_amp: bool = True
     amp_dtype: str = "float16"
+    optimizer: str = "adamw"
     reconstruction_pretrain_epochs: int = 3
     reconstruction_pretrain_lr: float = 3e-4
     mdvsc_bootstrap_epochs: int = 3
@@ -75,10 +76,15 @@ class Stage1OptimizationConfig:
     epochs: int = 10
     lr: float = 1e-4
     weight_decay: float = 1e-4
-    scheduler: str = "cosine"
+    adam_beta1: float = 0.9
+    adam_beta2: float = 0.95
+    scheduler: str = "onecycle"
     warmup_epochs: int = 1
     warmup_start_factor: float = 0.2
     min_lr_ratio: float = 0.1
+    onecycle_pct_start: float = 0.15
+    onecycle_div_factor: float = 25.0
+    onecycle_final_div_factor: float = 1000.0
     grad_clip_norm: float = 1.0
     log_every: int = 10
     save_every_epochs: int = 1
@@ -107,6 +113,14 @@ class Stage1OutputConfig:
 
 
 @dataclass(frozen=True)
+class Stage1InitializationConfig:
+    full_checkpoint: str | None = None
+    reconstruction_checkpoint: str | None = None
+    transmission_checkpoint: str | None = None
+    strict: bool = False
+
+
+@dataclass(frozen=True)
 class MDVSCStage1TrainConfig:
     detector: Stage1DetectorConfig = field(default_factory=Stage1DetectorConfig)
     data: Stage1DataConfig = field(default_factory=Stage1DataConfig)
@@ -114,6 +128,7 @@ class MDVSCStage1TrainConfig:
     optimization: Stage1OptimizationConfig = field(default_factory=Stage1OptimizationConfig)
     loss: Stage1LossConfig = field(default_factory=Stage1LossConfig)
     output: Stage1OutputConfig = field(default_factory=Stage1OutputConfig)
+    initialization: Stage1InitializationConfig = field(default_factory=Stage1InitializationConfig)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -129,19 +144,20 @@ def load_stage1_config(config_path: str | Path) -> MDVSCStage1TrainConfig:
     optimization_data = data.get("optimization") or {}
     loss_data = data.get("loss") or {}
     output_data = data.get("output") or {}
+    initialization_data = data.get("initialization") or {}
 
     return MDVSCStage1TrainConfig(
         detector=Stage1DetectorConfig(**detector_data),
         data=Stage1DataConfig(**data_data),
         mdvsc=Stage1MDVSCConfig(
             feature_channels=_as_int_list(mdvsc_data.get("feature_channels"), [256, 256, 256]),
-            latent_dims=_as_int_list(mdvsc_data.get("latent_dims"), [48, 64, 96]),
+            latent_dims=_as_int_list(mdvsc_data.get("latent_dims"), [32, 48, 64]),
             common_keep_ratios=_as_float_list(mdvsc_data.get("common_keep_ratios"), [0.5, 0.625, 0.75]),
             individual_keep_ratios=_as_float_list(mdvsc_data.get("individual_keep_ratios"), [0.125, 0.1875, 0.25]),
             block_sizes=_as_int_list(mdvsc_data.get("block_sizes"), [8, 4, 2]),
-            reconstruction_hidden_channels=int(mdvsc_data.get("reconstruction_hidden_channels", 256)),
-            reconstruction_detail_channels=int(mdvsc_data.get("reconstruction_detail_channels", 128)),
-            apply_masks=bool(mdvsc_data.get("apply_masks", False)),
+            reconstruction_hidden_channels=int(mdvsc_data.get("reconstruction_hidden_channels", 160)),
+            reconstruction_detail_channels=int(mdvsc_data.get("reconstruction_detail_channels", 64)),
+            apply_masks=bool(mdvsc_data.get("apply_masks", True)),
             channel_mode=str(mdvsc_data.get("channel_mode", "identity")),
             snr_db=float(mdvsc_data.get("snr_db", 20.0)),
         ),
@@ -157,4 +173,5 @@ def load_stage1_config(config_path: str | Path) -> MDVSCStage1TrainConfig:
             detection_box_weight=float(loss_data.get("detection_box_weight", 0.05)),
         ),
         output=Stage1OutputConfig(**output_data),
+        initialization=Stage1InitializationConfig(**initialization_data),
     )
