@@ -39,7 +39,7 @@ class MDVSCOutput:
 class ResidualBlock(nn.Module):
     def __init__(self, channels: int):
         super().__init__()
-        hidden_channels = max(channels, channels * 2)
+        hidden_channels = channels
         groups = _group_count(channels)
         self.norm = SafeGroupNorm(groups, channels)
         self.expand = nn.Conv2d(channels, hidden_channels, kernel_size=1)
@@ -75,7 +75,7 @@ class SafeGroupNorm(nn.Module):
 class ReconstructionResidualBlock(nn.Module):
     def __init__(self, channels: int):
         super().__init__()
-        hidden_channels = max(channels, channels * 2)
+        hidden_channels = channels
         groups = _group_count(channels)
         self.norm1 = SafeGroupNorm(groups, channels)
         self.norm2 = SafeGroupNorm(_group_count(hidden_channels), hidden_channels)
