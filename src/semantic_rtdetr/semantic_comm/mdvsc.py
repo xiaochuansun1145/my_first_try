@@ -6,6 +6,7 @@ from typing import Any
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import torch.utils.checkpoint as checkpoint_util
 
 
 @dataclass(frozen=True)
@@ -277,6 +278,122 @@ class PerLevelMDVSC(nn.Module):
         return features + noise
 
 
+class LightUpsampleBlock(nn.Module):
+    """Bilinear 2x upsample + depth-wise separable conv.
+
+    Much lighter than ``UpsampleRefineBlock`` (no full 3x3 conv or ResBlock
+    at high resolution) and more parameter-efficient than PixelShuffle
+    (no 4x channel expansion in the conv).  The DW-separable structure
+    still provides learned spatial refinement at each scale.
+    """
+
+    def __init__(self, in_channels: int, out_channels: int):
+        super().__init__()
+        groups = _group_count(out_channels)
+        self.block = nn.Sequential(
+            nn.Upsample(scale_factor=2, mode="bilinear", align_corners=False),
+            nn.Conv2d(in_channels, out_channels, kernel_size=1),
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1, groups=out_channels),
+            SafeGroupNorm(groups, out_channels),
+            nn.GELU(),
+        )
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        return self.block(inputs)
+
+
+class LightReconstructionHead(nn.Module):
+    """Lightweight reconstruction head with additive FPN and DW-separable upsampling.
+
+    Compared to ``ReconstructionHead``:
+    * ~55 % fewer parameters (additive FPN, no separate detail branch,
+      DW-separable upsample instead of Conv3x3 + ResBlock)
+    * Significantly less peak VRAM (no heavy convolutions at 320x320 / 640x640)
+    * Learnable high-frequency residual scale (initial 0.2 instead of fixed 0.15)
+    * Optional gradient-checkpointed upsampling stages for further VRAM savings
+    """
+
+    def __init__(
+        self,
+        feature_channels: list[int],
+        hidden_channels: int = 128,
+        detail_channels: int = 48,
+        use_checkpoint: bool = False,
+    ):
+        super().__init__()
+        if len(feature_channels) != 3:
+            raise ValueError("LightReconstructionHead expects exactly three feature levels")
+        self.use_checkpoint = use_checkpoint
+
+        # ---------- 1x1 projections to a common channel dimension ----------
+        self.proj0 = nn.Conv2d(feature_channels[0], hidden_channels, kernel_size=1)
+        self.proj1 = nn.Conv2d(feature_channels[1], hidden_channels, kernel_size=1)
+        self.proj2 = nn.Conv2d(feature_channels[2], hidden_channels, kernel_size=1)
+
+        # ---------- Post-fusion depth-wise separable refinement (stride 8) ----------
+        groups = _group_count(hidden_channels)
+        self.refine = nn.Sequential(
+            nn.Conv2d(hidden_channels, hidden_channels, kernel_size=3, padding=1, groups=hidden_channels),
+            nn.Conv2d(hidden_channels, hidden_channels, kernel_size=1),
+            SafeGroupNorm(groups, hidden_channels),
+            nn.GELU(),
+        )
+
+        # ---------- Lightweight 8x upsampling: stride-8 -> stride-1 ----------
+        self.mid_channels = max(hidden_channels // 2, detail_channels)
+        self.output_channels = max(detail_channels, 32)
+        self.up1 = LightUpsampleBlock(hidden_channels, self.mid_channels)
+        self.up2 = LightUpsampleBlock(self.mid_channels, self.output_channels)
+        self.up3 = LightUpsampleBlock(self.output_channels, self.output_channels)
+
+        # ---------- Output heads ----------
+        self.base_head = nn.Sequential(
+            nn.Conv2d(self.output_channels, 3, kernel_size=3, padding=1),
+            nn.Sigmoid(),
+        )
+        self.detail_head = nn.Conv2d(self.output_channels, 3, kernel_size=3, padding=1)
+        self.hf_scale = nn.Parameter(torch.tensor(0.2))
+
+    def decode_components(
+        self,
+        feature_maps: list[torch.Tensor],
+        output_size: tuple[int, int],
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        # Project all levels to the same channel dimension
+        f0 = self.proj0(feature_maps[0])  # stride 8
+        f1 = self.proj1(feature_maps[1])  # stride 16
+        f2 = self.proj2(feature_maps[2])  # stride 32
+
+        # Top-down additive FPN
+        f1 = f1 + F.interpolate(f2, size=f1.shape[-2:], mode="nearest")
+        f0 = f0 + F.interpolate(f1, size=f0.shape[-2:], mode="nearest")
+
+        # Refine at stride 8
+        fused = self.refine(f0)
+
+        # Progressive lightweight upsampling
+        if self.use_checkpoint and self.training:
+            x = checkpoint_util.checkpoint(self.up1, fused, use_reentrant=False)
+            x = checkpoint_util.checkpoint(self.up2, x, use_reentrant=False)
+            x = checkpoint_util.checkpoint(self.up3, x, use_reentrant=False)
+        else:
+            x = self.up1(fused)
+            x = self.up2(x)
+            x = self.up3(x)
+
+        if x.shape[-2:] != output_size:
+            x = F.interpolate(x, size=output_size, mode="bilinear", align_corners=False)
+
+        base = self.base_head(x)
+        high_frequency_residual = self.hf_scale * torch.tanh(self.detail_head(x))
+        reconstructed = (base + high_frequency_residual).clamp(0.0, 1.0)
+        return reconstructed, base, high_frequency_residual
+
+    def forward(self, feature_maps: list[torch.Tensor], output_size: tuple[int, int]) -> torch.Tensor:
+        reconstructed, _, _ = self.decode_components(feature_maps, output_size)
+        return reconstructed
+
+
 class ReconstructionHead(nn.Module):
     def __init__(
         self,
@@ -364,6 +481,8 @@ class ProjectMDVSC(nn.Module):
         block_sizes: list[int] | tuple[int, ...] = (8, 4, 2),
         reconstruction_hidden_channels: int = 256,
         reconstruction_detail_channels: int = 128,
+        reconstruction_head_type: str = "light",
+        reconstruction_use_checkpoint: bool = False,
     ):
         super().__init__()
         self.feature_channels = list(feature_channels)
@@ -373,6 +492,8 @@ class ProjectMDVSC(nn.Module):
         self.block_sizes = list(block_sizes)
         self.reconstruction_hidden_channels = reconstruction_hidden_channels
         self.reconstruction_detail_channels = reconstruction_detail_channels
+        self.reconstruction_head_type = reconstruction_head_type
+        self.reconstruction_use_checkpoint = reconstruction_use_checkpoint
 
         if not (
             len(self.feature_channels)
@@ -399,11 +520,19 @@ class ProjectMDVSC(nn.Module):
                 self.block_sizes,
             )
         )
-        self.reconstruction_head = ReconstructionHead(
-            self.feature_channels,
-            hidden_channels=self.reconstruction_hidden_channels,
-            detail_channels=self.reconstruction_detail_channels,
-        )
+        if self.reconstruction_head_type == "light":
+            self.reconstruction_head = LightReconstructionHead(
+                self.feature_channels,
+                hidden_channels=self.reconstruction_hidden_channels,
+                detail_channels=self.reconstruction_detail_channels,
+                use_checkpoint=self.reconstruction_use_checkpoint,
+            )
+        else:
+            self.reconstruction_head = ReconstructionHead(
+                self.feature_channels,
+                hidden_channels=self.reconstruction_hidden_channels,
+                detail_channels=self.reconstruction_detail_channels,
+            )
         self.detection_refinement_heads = nn.ModuleList(
             TaskAdaptationBlock(channels) for channels in self.feature_channels
         )

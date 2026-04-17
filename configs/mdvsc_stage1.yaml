@@ -31,6 +31,8 @@ mdvsc:
   block_sizes: [8, 4, 2]
   reconstruction_hidden_channels: 160
   reconstruction_detail_channels: 64
+  reconstruction_head_type: light
+  reconstruction_use_checkpoint: false
   apply_masks: True
   channel_mode: identity
   snr_db: 20.0
@@ -69,6 +71,7 @@ loss:
   recon_mse_weight: 0.25
   recon_ssim_weight: 0.25
   recon_edge_weight: 0.2
+  ssim_downsample_factor: 2
   detection_logit_weight: 0.05
   detection_box_weight: 0.05
   level_loss_weights: [1.0, 1.0, 1.0]

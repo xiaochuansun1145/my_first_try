@@ -100,6 +100,83 @@ class ProjectMDVSCTest(unittest.TestCase):
         self.assertTrue(torch.equal(common_level0[0::2, 0::2], common_level0[1::2, 1::2]))
         self.assertTrue(torch.equal(individual_level0[0::2, 0::2], individual_level0[1::2, 1::2]))
 
+    def test_light_reconstruction_head_output_shape(self) -> None:
+        model = ProjectMDVSC(
+            feature_channels=[16, 16, 16],
+            latent_dims=[8, 8, 8],
+            common_keep_ratios=[0.5, 0.5, 0.5],
+            individual_keep_ratios=[0.25, 0.25, 0.25],
+            block_sizes=[4, 2, 1],
+            reconstruction_head_type="light",
+        )
+        feature_sequences = [
+            torch.randn(1, 2, 16, 8, 8),
+            torch.randn(1, 2, 16, 4, 4),
+            torch.randn(1, 2, 16, 2, 2),
+        ]
+        outputs = model.reconstruct_from_feature_sequences(feature_sequences, output_size=(64, 64))
+        self.assertEqual(outputs.reconstructed_frames.shape, (1, 2, 3, 64, 64))
+        self.assertEqual(outputs.reconstructed_base_frames.shape, (1, 2, 3, 64, 64))
+        self.assertEqual(outputs.reconstructed_high_frequency_residuals.shape, (1, 2, 3, 64, 64))
+
+    def test_standard_reconstruction_head_still_works(self) -> None:
+        model = ProjectMDVSC(
+            feature_channels=[16, 16, 16],
+            latent_dims=[8, 8, 8],
+            common_keep_ratios=[0.5, 0.5, 0.5],
+            individual_keep_ratios=[0.25, 0.25, 0.25],
+            block_sizes=[4, 2, 1],
+            reconstruction_head_type="standard",
+        )
+        feature_sequences = [
+            torch.randn(1, 2, 16, 8, 8),
+            torch.randn(1, 2, 16, 4, 4),
+            torch.randn(1, 2, 16, 2, 2),
+        ]
+        outputs = model.reconstruct_from_feature_sequences(feature_sequences, output_size=(64, 64))
+        self.assertEqual(outputs.reconstructed_frames.shape, (1, 2, 3, 64, 64))
+
+    def test_light_head_backward_pass(self) -> None:
+        model = ProjectMDVSC(
+            feature_channels=[16, 16, 16],
+            latent_dims=[8, 8, 8],
+            common_keep_ratios=[0.5, 0.5, 0.5],
+            individual_keep_ratios=[0.25, 0.25, 0.25],
+            block_sizes=[4, 2, 1],
+            reconstruction_head_type="light",
+        )
+        feature_sequences = [
+            torch.randn(1, 2, 16, 8, 8),
+            torch.randn(1, 2, 16, 4, 4),
+            torch.randn(1, 2, 16, 2, 2),
+        ]
+        outputs = model.reconstruct_from_feature_sequences(feature_sequences, output_size=(64, 64))
+        loss = outputs.reconstructed_frames.mean()
+        loss.backward()
+        # Verify hf_scale gradient flows
+        self.assertIsNotNone(model.reconstruction_head.hf_scale.grad)
+
+    def test_light_head_with_checkpoint(self) -> None:
+        model = ProjectMDVSC(
+            feature_channels=[16, 16, 16],
+            latent_dims=[8, 8, 8],
+            common_keep_ratios=[0.5, 0.5, 0.5],
+            individual_keep_ratios=[0.25, 0.25, 0.25],
+            block_sizes=[4, 2, 1],
+            reconstruction_head_type="light",
+            reconstruction_use_checkpoint=True,
+        )
+        model.train()
+        feature_sequences = [
+            torch.randn(1, 2, 16, 8, 8),
+            torch.randn(1, 2, 16, 4, 4),
+            torch.randn(1, 2, 16, 2, 2),
+        ]
+        outputs = model.reconstruct_from_feature_sequences(feature_sequences, output_size=(64, 64))
+        loss = outputs.reconstructed_frames.mean()
+        loss.backward()
+        self.assertEqual(outputs.reconstructed_frames.shape, (1, 2, 3, 64, 64))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -69,13 +69,18 @@ def _gaussian_kernel(kernel_size: int, sigma: float, channels: int, device: torc
     return kernel_2d.expand(channels, 1, kernel_size, kernel_size).contiguous()
 
 
-def _ssim_loss(prediction: torch.Tensor, target: torch.Tensor, kernel_size: int = 11, sigma: float = 1.5) -> torch.Tensor:
+def _ssim_loss(prediction: torch.Tensor, target: torch.Tensor, kernel_size: int = 11, sigma: float = 1.5, downsample_factor: int = 1) -> torch.Tensor:
     if prediction.shape != target.shape:
         raise ValueError("prediction and target must have the same shape for SSIM")
 
     batch_size, time_steps, channels, height, width = prediction.shape
     prediction_2d = prediction.view(batch_size * time_steps, channels, height, width)
     target_2d = target.view(batch_size * time_steps, channels, height, width)
+
+    if downsample_factor > 1:
+        prediction_2d = F.avg_pool2d(prediction_2d, kernel_size=downsample_factor, stride=downsample_factor)
+        target_2d = F.avg_pool2d(target_2d, kernel_size=downsample_factor, stride=downsample_factor)
+
     kernel = _gaussian_kernel(kernel_size, sigma, channels, prediction.device, prediction.dtype)
     padding = kernel_size // 2
 
@@ -169,6 +174,8 @@ class Stage1Trainer:
             block_sizes=config.mdvsc.block_sizes,
             reconstruction_hidden_channels=config.mdvsc.reconstruction_hidden_channels,
             reconstruction_detail_channels=config.mdvsc.reconstruction_detail_channels,
+            reconstruction_head_type=config.mdvsc.reconstruction_head_type,
+            reconstruction_use_checkpoint=config.mdvsc.reconstruction_use_checkpoint,
         ).to(self.baseline.device)
         self._load_initialization()
         self.parameter_counts = self._summarize_parameter_counts()
@@ -475,7 +482,11 @@ class Stage1Trainer:
         if phase in {PHASE_RECONSTRUCTION_PRETRAIN, PHASE_JOINT_TRAINING}:
             recon_l1_loss = F.l1_loss(reconstructed_frames, frames_fp32)
             recon_mse_loss = F.mse_loss(reconstructed_frames, frames_fp32)
-            recon_ssim_loss = _ssim_loss(reconstructed_frames, frames_fp32)
+            recon_ssim_loss = _ssim_loss(
+                reconstructed_frames,
+                frames_fp32,
+                downsample_factor=self.config.loss.ssim_downsample_factor,
+            )
             recon_edge_loss = _gradient_edge_loss(reconstructed_frames, frames_fp32)
 
         detection_logit_loss = torch.zeros((), device=frames.device, dtype=torch.float32)

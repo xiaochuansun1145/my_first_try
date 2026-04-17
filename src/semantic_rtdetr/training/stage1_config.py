@@ -57,6 +57,8 @@ class Stage1MDVSCConfig:
     block_sizes: list[int] = field(default_factory=lambda: [8, 4, 2])
     reconstruction_hidden_channels: int = 160
     reconstruction_detail_channels: int = 64
+    reconstruction_head_type: str = "light"
+    reconstruction_use_checkpoint: bool = False
     apply_masks: bool = True
     channel_mode: str = "identity"
     snr_db: float = 20.0
@@ -99,6 +101,7 @@ class Stage1LossConfig:
     recon_mse_weight: float = 0.25
     recon_ssim_weight: float = 0.25
     recon_edge_weight: float = 0.2
+    ssim_downsample_factor: int = 2
     detection_logit_weight: float = 0.05
     detection_box_weight: float = 0.05
     level_loss_weights: list[float] = field(default_factory=lambda: [1.0, 1.0, 1.0])
