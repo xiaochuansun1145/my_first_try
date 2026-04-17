@@ -107,6 +107,37 @@ class RTDetrBaseline:
         )
 
     @torch.no_grad()
+    def extract_backbone_and_projected_features(
+        self, inputs: dict[str, torch.Tensor]
+    ) -> tuple[list[torch.Tensor], EncoderFeatureBundle]:
+        """Extract raw backbone features and projected feature bundle in one backbone pass."""
+        core_model = self.model.model
+        pixel_values = inputs["pixel_values"]
+        pixel_mask = inputs.get("pixel_mask")
+
+        if pixel_mask is None:
+            batch_size, _, height, width = pixel_values.shape
+            pixel_mask = torch.ones((batch_size, height, width), device=pixel_values.device)
+
+        backbone_features = core_model.backbone(pixel_values, pixel_mask)
+        raw_features: list[torch.Tensor] = []
+        projected_features: list[torch.Tensor] = []
+        for level, (source, _mask) in enumerate(backbone_features):
+            raw_features.append(source)
+            projected_features.append(core_model.encoder_input_proj[level](source))
+
+        decoder_sources = self._build_decoder_sources(projected_features)
+        spatial_shapes, level_start_index = self._build_decoder_indices(decoder_sources)
+
+        projected_bundle = EncoderFeatureBundle(
+            feature_maps=list(projected_features),
+            spatial_shapes=spatial_shapes,
+            level_start_index=level_start_index,
+            strides=list(core_model.encoder.out_strides),
+        )
+        return raw_features, projected_bundle
+
+    @torch.no_grad()
     def extract_encoder_feature_bundle(self, inputs: dict[str, torch.Tensor]) -> EncoderFeatureBundle:
         return self.extract_projected_backbone_feature_bundle(inputs)
 
