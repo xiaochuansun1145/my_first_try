@@ -5,8 +5,8 @@ detector:
   device: auto
 
 data:
-  dataset_name: generic
-  train_source_path:
+  dataset_name: imagenet_vid
+  train_source_path: /root/autodl-tmp/dataset/VID/raw/ILSVRC2015/Data/VID/train
   val_source_path:
   recursive: true
   index_cache_dir: .cache/stage2_1_data
