@@ -1,0 +1,73 @@
+detector:
+  hf_name: PekingU/rtdetr_r50vd
+  local_path: pretrained/rtdetr_r50vd
+  cache_dir:
+  device: auto
+
+data:
+  dataset_name: generic
+  train_source_path:
+  val_source_path:
+  recursive: true
+  index_cache_dir: .cache/stage3_data
+  subset_seed: 42
+  source_fraction: 1.0
+  sample_fraction: 1.0
+  gop_size: 4
+  frame_height: 640
+  frame_width: 640
+  frame_stride: 1
+  gop_stride: 2
+  max_frames_per_source:
+  max_sources:
+  max_samples:
+  train_val_split: 0.1
+
+mdvsc:
+  feature_channels: [256, 256, 256]
+  latent_dims: [64, 80, 96]
+  common_keep_ratios: [0.6, 0.7, 0.8]
+  individual_keep_ratios: [0.15, 0.2, 0.25]
+  block_sizes: [4, 2, 1]
+  apply_cross_level_fusion: true
+  apply_masks: true
+  channel_mode: identity
+  snr_db: 20.0
+
+optimization:
+  batch_size: 1
+  num_workers: 4
+  use_amp: true
+  amp_dtype: float16
+  optimizer: adamw
+  epochs: 20
+  lr: 2.0e-4
+  weight_decay: 1.0e-4
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  scheduler: onecycle
+  warmup_epochs: 2
+  warmup_start_factor: 0.1
+  min_lr_ratio: 0.05
+  onecycle_pct_start: 0.2
+  onecycle_div_factor: 20.0
+  onecycle_final_div_factor: 500.0
+  grad_clip_norm: 1.0
+  log_every: 10
+  save_every_epochs: 1
+  max_steps_per_epoch:
+  seed: 42
+
+loss:
+  feature_loss_type: smooth_l1
+  level_loss_weights: [1.0, 1.0, 1.0]
+
+output:
+  output_dir: outputs/mdvsc_stage3
+  save_visualizations: true
+  visualization_every_epochs: 1
+  visualization_num_frames: 4
+
+initialization:
+  checkpoint:
+  strict: false

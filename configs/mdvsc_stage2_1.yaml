@@ -1,0 +1,80 @@
+detector:
+  hf_name: PekingU/rtdetr_r50vd
+  local_path: pretrained/rtdetr_r50vd
+  cache_dir:
+  device: auto
+
+data:
+  dataset_name: generic
+  train_source_path:
+  val_source_path:
+  recursive: true
+  index_cache_dir: .cache/stage2_1_data
+  subset_seed: 42
+  source_fraction: 1.0
+  sample_fraction: 1.0
+  gop_size: 4
+  frame_height: 640
+  frame_width: 640
+  frame_stride: 1
+  gop_stride: 2
+  max_frames_per_source:
+  max_sources:
+  max_samples:
+  train_val_split: 0.1
+
+mdvsc:
+  backbone_channels: [512, 1024, 2048]
+  shared_channels: 256
+  reconstruction_hidden_channels: 160
+  reconstruction_detail_channels: 64
+  reconstruction_head_type: light
+  reconstruction_use_checkpoint: false
+  # Detail bypass
+  stage1_channels: 256
+  detail_latent_channels: 32
+  detail_spatial_size: 20
+
+optimization:
+  batch_size: 1
+  num_workers: 4
+  use_amp: true
+  amp_dtype: float16
+  optimizer: adamw
+  epochs: 20
+  lr: 2.0e-4
+  weight_decay: 1.0e-4
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  scheduler: onecycle
+  warmup_epochs: 1
+  warmup_start_factor: 0.2
+  min_lr_ratio: 0.1
+  onecycle_pct_start: 0.15
+  onecycle_div_factor: 25.0
+  onecycle_final_div_factor: 1000.0
+  grad_clip_norm: 1.0
+  log_every: 10
+  save_every_epochs: 1
+  max_steps_per_epoch:
+  seed: 42
+
+loss:
+  det_recovery_weight: 1.0
+  recon_l1_weight: 1.0
+  recon_mse_weight: 0.25
+  recon_ssim_weight: 0.25
+  recon_edge_weight: 0.2
+  ssim_downsample_factor: 2
+  level_recovery_weights: [1.0, 1.0, 1.0]
+
+output:
+  output_dir: outputs/mdvsc_stage2_1
+  save_visualizations: true
+  visualization_every_epochs: 1
+  visualization_num_frames: 4
+
+initialization:
+  full_checkpoint:
+  stage2_checkpoint:
+  strict: false

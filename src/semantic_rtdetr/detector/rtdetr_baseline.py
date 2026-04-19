@@ -138,6 +138,50 @@ class RTDetrBaseline:
         return raw_features, projected_bundle
 
     @torch.no_grad()
+    def extract_all_backbone_features(
+        self, inputs: dict[str, torch.Tensor]
+    ) -> tuple[torch.Tensor, list[torch.Tensor], EncoderFeatureBundle]:
+        """Extract stage1 detail features, raw backbone features, and projected bundle.
+
+        Returns:
+            stage1_features: ``[B, 256, H/4, W/4]`` from ResNet stage1.
+            raw_features: Per-level raw backbone features (stage2/3/4).
+            projected_bundle: Projected encoder feature bundle.
+        """
+        core_model = self.model.model
+        pixel_values = inputs["pixel_values"]
+        pixel_mask = inputs.get("pixel_mask")
+
+        if pixel_mask is None:
+            batch_size, _, height, width = pixel_values.shape
+            pixel_mask = torch.ones((batch_size, height, width), device=pixel_values.device)
+
+        # Access the inner backbone model to get all hidden states including stage1
+        inner_backbone = core_model.backbone.model
+        backbone_output = inner_backbone(pixel_values, output_hidden_states=True, return_dict=True)
+        # hidden_states: (stem, stage1, stage2, stage3, stage4)
+        all_hidden_states = backbone_output.hidden_states
+        stage1_features = all_hidden_states[1]  # [B, 256, H/4, W/4]
+
+        # stage2/3/4 from feature_maps (filtered by out_features config)
+        raw_features: list[torch.Tensor] = list(backbone_output.feature_maps)
+        projected_features = [
+            core_model.encoder_input_proj[level](source)
+            for level, source in enumerate(raw_features)
+        ]
+
+        decoder_sources = self._build_decoder_sources(projected_features)
+        spatial_shapes, level_start_index = self._build_decoder_indices(decoder_sources)
+
+        projected_bundle = EncoderFeatureBundle(
+            feature_maps=list(projected_features),
+            spatial_shapes=spatial_shapes,
+            level_start_index=level_start_index,
+            strides=list(core_model.encoder.out_strides),
+        )
+        return stage1_features, raw_features, projected_bundle
+
+    @torch.no_grad()
     def extract_encoder_feature_bundle(self, inputs: dict[str, torch.Tensor]) -> EncoderFeatureBundle:
         return self.extract_projected_backbone_feature_bundle(inputs)
 
