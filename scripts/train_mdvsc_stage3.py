@@ -23,6 +23,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--data", help="Override data.train_source_path.")
     parser.add_argument("--output", help="Override output.output_dir.")
+    parser.add_argument("--stage2-ckpt", help="Override initialization.stage2_checkpoint (path to stage-2 .pt file).")
     return parser.parse_args()
 
 
@@ -34,6 +35,8 @@ def main() -> None:
         config = replace(config, data=replace(config.data, train_source_path=args.data))
     if args.output:
         config = replace(config, output=replace(config.output, output_dir=args.output))
+    if args.stage2_ckpt:
+        config = replace(config, initialization=replace(config.initialization, stage2_checkpoint=args.stage2_ckpt))
 
     summary = run_stage3_training(config)
     print(json.dumps(summary, indent=2, ensure_ascii=False))

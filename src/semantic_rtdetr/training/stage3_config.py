@@ -50,6 +50,7 @@ class Stage3DataConfig:
 
 @dataclass(frozen=True)
 class Stage3MDVSCConfig:
+    backbone_channels: list[int] = field(default_factory=lambda: [512, 1024, 2048])
     feature_channels: list[int] = field(default_factory=lambda: [256, 256, 256])
     latent_dims: list[int] = field(default_factory=lambda: [64, 80, 96])
     common_keep_ratios: list[float] = field(default_factory=lambda: [0.6, 0.7, 0.8])
@@ -103,6 +104,7 @@ class Stage3OutputConfig:
 
 @dataclass(frozen=True)
 class Stage3InitializationConfig:
+    stage2_checkpoint: str | None = None
     checkpoint: str | None = None
     strict: bool = False
 
@@ -137,6 +139,7 @@ def load_stage3_config(config_path: str | Path) -> MDVSCStage3TrainConfig:
         detector=Stage3DetectorConfig(**detector_data),
         data=Stage3DataConfig(**data_data),
         mdvsc=Stage3MDVSCConfig(
+            backbone_channels=_as_int_list(mdvsc_data.get("backbone_channels"), [512, 1024, 2048]),
             feature_channels=_as_int_list(mdvsc_data.get("feature_channels"), [256, 256, 256]),
             latent_dims=_as_int_list(mdvsc_data.get("latent_dims"), [64, 80, 96]),
             common_keep_ratios=_as_float_list(mdvsc_data.get("common_keep_ratios"), [0.6, 0.7, 0.8]),

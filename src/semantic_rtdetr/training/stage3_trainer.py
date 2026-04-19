@@ -1,8 +1,12 @@
 """Stage-3 trainer: feature-map reconstruction only, using MDVSC v2.
 
-Loss = weighted sum of per-level smooth_l1 (or mse) between restored features
-and frozen RT-DETR teacher features.  No reconstruction-head or detection-
-consistency losses.
+Pipeline:
+    raw backbone features → frozen SharedEncoder (from stage-2) → shared 256
+    → MDVSC v2 (trainable) → restored 256
+
+Loss = weighted sum of per-level smooth_l1 (or mse) between MDVSC-restored
+features and the frozen SharedEncoder output (teacher shared features).
+Only MDVSC v2 parameters are trained; RT-DETR and SharedEncoder are frozen.
 """
 
 from __future__ import annotations
@@ -24,6 +28,7 @@ from tqdm import tqdm
 from src.semantic_rtdetr.contracts import EncoderFeatureBundle
 from src.semantic_rtdetr.detector.rtdetr_baseline import RTDetrBaseline
 from src.semantic_rtdetr.semantic_comm.mdvsc_v2 import MDVSCV2Output, ProjectMDVSCV2
+from src.semantic_rtdetr.semantic_comm.stage2_model import SharedEncoder
 from src.semantic_rtdetr.training.stage3_config import MDVSCStage3TrainConfig
 from src.semantic_rtdetr.training.stage1_data import build_train_val_datasets
 
@@ -102,7 +107,17 @@ class Stage3Trainer:
             p.requires_grad = False
         self.baseline.model.eval()
 
-        # ---- MDVSC v2 model ----
+        # ---- SharedEncoder (frozen, loaded from stage-2 checkpoint) ----
+        self.shared_encoder = SharedEncoder(
+            backbone_channels=config.mdvsc.backbone_channels,
+            shared_channels=config.mdvsc.feature_channels[0],
+        ).to(self.baseline.device)
+        self._load_shared_encoder()
+        for p in self.shared_encoder.parameters():
+            p.requires_grad = False
+        self.shared_encoder.eval()
+
+        # ---- MDVSC v2 model (trainable) ----
         self.model = ProjectMDVSCV2(
             feature_channels=config.mdvsc.feature_channels,
             latent_dims=config.mdvsc.latent_dims,
@@ -229,9 +244,12 @@ class Stage3Trainer:
             with torch.amp.autocast(device_type=self.baseline.device.type, dtype=self.amp_dtype, enabled=self.amp_on):
                 with torch.no_grad():
                     det_in = self.baseline.prepare_frame_tensor_batch(flat)
-                    teacher_bundle = self.baseline.extract_projected_backbone_feature_bundle(det_in)
+                    raw_features, _proj_bundle = self.baseline.extract_backbone_and_projected_features(det_in)
+                    # Run frozen SharedEncoder to get target sequences
+                    backbone_seqs = [feat.view(B, T, *feat.shape[1:]) for feat in raw_features]
+                    shared_seqs = self._encode_with_shared_encoder(backbone_seqs)
 
-                target_seqs = _bundle_to_sequences(teacher_bundle, B, T)
+                target_seqs = shared_seqs  # teacher: frozen SharedEncoder output
                 out: MDVSCV2Output = self.model(
                     target_seqs,
                     apply_masks=self.config.mdvsc.apply_masks,
@@ -365,6 +383,32 @@ class Stage3Trainer:
             "summary": summary,
         }, self.output_dir / name)
 
+    def _load_shared_encoder(self) -> None:
+        """Load SharedEncoder weights from a stage-2 checkpoint."""
+        ckpt_path = self.config.initialization.stage2_checkpoint
+        if not ckpt_path:
+            print("[stage3] WARNING: No stage2_checkpoint specified – SharedEncoder uses random init", flush=True)
+            return
+        raw = torch.load(ckpt_path, map_location="cpu")
+        state = raw.get("model_state", raw) if isinstance(raw, dict) else raw
+        # Extract only shared_encoder.* keys
+        prefix = "shared_encoder."
+        se_state = {k[len(prefix):]: v for k, v in state.items() if k.startswith(prefix)}
+        if not se_state:
+            raise ValueError(f"No shared_encoder parameters found in {ckpt_path}")
+        self.shared_encoder.load_state_dict(se_state, strict=True)
+        print(f"[stage3] Loaded SharedEncoder ({len(se_state)} params) from {ckpt_path}", flush=True)
+
+    def _encode_with_shared_encoder(self, backbone_seqs: list[torch.Tensor]) -> list[torch.Tensor]:
+        """Run frozen SharedEncoder on per-level backbone sequences → shared 256 sequences."""
+        shared_seqs: list[torch.Tensor] = []
+        for proj, seq in zip(self.shared_encoder.projections, backbone_seqs):
+            B, T, C, H, W = seq.shape
+            flat = seq.reshape(B * T, C, H, W)
+            shared = proj(flat)
+            shared_seqs.append(shared.reshape(B, T, self.shared_encoder.shared_channels, H, W))
+        return shared_seqs
+
     def _load_init(self):
         ckpt_path = self.config.initialization.checkpoint
         if not ckpt_path:
@@ -372,7 +416,7 @@ class Stage3Trainer:
         raw = torch.load(ckpt_path, map_location="cpu")
         state = raw.get("model_state", raw) if isinstance(raw, dict) else raw
         self.model.load_state_dict(state, strict=self.config.initialization.strict)
-        print(f"[stage3] Loaded checkpoint: {ckpt_path}", flush=True)
+        print(f"[stage3] Loaded MDVSC v2 checkpoint: {ckpt_path}", flush=True)
 
     # ------------------------------------------------------------------
     # Misc
@@ -384,12 +428,15 @@ class Stage3Trainer:
         return min(len(loader), self.config.optimization.max_steps_per_epoch)
 
     def _count_params(self) -> dict[str, int]:
-        return {
-            "total": sum(p.numel() for p in self.model.parameters()),
-            "trainable": sum(p.numel() for p in self.model.parameters() if p.requires_grad),
+        counts = {
+            "mdvsc_v2_total": sum(p.numel() for p in self.model.parameters()),
+            "mdvsc_v2_trainable": sum(p.numel() for p in self.model.parameters() if p.requires_grad),
             "level_modules": sum(p.numel() for p in self.model.level_modules.parameters()),
             "cross_level_fusion": sum(p.numel() for p in self.model.cross_level_fusion.parameters()) if self.model.cross_level_fusion else 0,
+            "shared_encoder_frozen": sum(p.numel() for p in self.shared_encoder.parameters()),
         }
+        print(f"[stage3] Parameters: MDVSC v2 trainable={counts['mdvsc_v2_trainable']:,}, SharedEncoder frozen={counts['shared_encoder_frozen']:,}", flush=True)
+        return counts
 
     def _should_vis(self, epoch):
         if not self.config.output.save_visualizations:
