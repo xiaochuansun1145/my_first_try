@@ -124,6 +124,7 @@ class Stage3Trainer:
             common_keep_ratios=config.mdvsc.common_keep_ratios,
             individual_keep_ratios=config.mdvsc.individual_keep_ratios,
             block_sizes=config.mdvsc.block_sizes,
+            spatial_strides=config.mdvsc.spatial_strides,
             apply_cross_level_fusion=config.mdvsc.apply_cross_level_fusion,
         ).to(self.baseline.device)
         self._load_init()

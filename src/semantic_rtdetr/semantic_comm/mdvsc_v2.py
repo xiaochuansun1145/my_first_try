@@ -82,11 +82,14 @@ class ResBlock(nn.Module):
 
 
 class DownBlock(nn.Module):
-    """Halve channels: conv1x1 + 2×ResBlock + SE."""
+    """Channel reduction with optional spatial downsampling via strided conv."""
 
-    def __init__(self, in_ch: int, out_ch: int):
+    def __init__(self, in_ch: int, out_ch: int, stride: int = 1):
         super().__init__()
-        self.proj = nn.Conv2d(in_ch, out_ch, 1)
+        if stride > 1:
+            self.proj = nn.Conv2d(in_ch, out_ch, kernel_size=3, stride=stride, padding=1)
+        else:
+            self.proj = nn.Conv2d(in_ch, out_ch, 1)
         self.res1 = ResBlock(out_ch)
         self.res2 = ResBlock(out_ch)
         self.se = SEBlock(out_ch)
@@ -98,15 +101,18 @@ class DownBlock(nn.Module):
 
 
 class UpBlock(nn.Module):
-    """Double channels back: concat skip → conv1x1 → 2×ResBlock."""
+    """Channel expansion with optional spatial upsampling to match skip size."""
 
-    def __init__(self, in_ch: int, skip_ch: int, out_ch: int):
+    def __init__(self, in_ch: int, skip_ch: int, out_ch: int, upsample: bool = False):
         super().__init__()
+        self.upsample = upsample
         self.proj = nn.Conv2d(in_ch + skip_ch, out_ch, 1)
         self.res1 = ResBlock(out_ch)
         self.res2 = ResBlock(out_ch)
 
     def forward(self, x: torch.Tensor, skip: torch.Tensor) -> torch.Tensor:
+        if self.upsample:
+            x = F.interpolate(x, size=skip.shape[-2:], mode="bilinear", align_corners=False)
         x = torch.cat([x, skip], dim=1)
         x = self.proj(x)
         return self.res2(self.res1(x))
@@ -117,34 +123,44 @@ class UpBlock(nn.Module):
 # ---------------------------------------------------------------------------
 
 class ProgressiveEncoder(nn.Module):
-    """``in_channels → mid → latent_dim`` with skip connections at each stage."""
+    """``in_channels → mid → latent_dim`` with skip connections.
 
-    def __init__(self, in_channels: int, latent_dim: int):
+    When ``spatial_stride > 1`` the second stage applies strided convolution
+    so the latent spatial size becomes ``(H // spatial_stride, W // spatial_stride)``.
+    The first stage keeps the original resolution for the skip connection.
+    """
+
+    def __init__(self, in_channels: int, latent_dim: int, spatial_stride: int = 1):
         super().__init__()
         mid = max((in_channels + latent_dim) // 2, latent_dim)
-        # stage 0: in_channels → mid
-        self.down0 = DownBlock(in_channels, mid)
-        # stage 1: mid → latent_dim
-        self.down1 = DownBlock(mid, latent_dim)
+        # stage 0: in_channels → mid  (full resolution — provides skip)
+        self.down0 = DownBlock(in_channels, mid, stride=1)
+        # stage 1: mid → latent_dim   (optional spatial downsampling)
+        self.down1 = DownBlock(mid, latent_dim, stride=spatial_stride)
         # bottleneck
         self.bottleneck = ResBlock(latent_dim)
         self.skip0_channels = mid
+        self.spatial_stride = spatial_stride
 
     def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """Returns (latent, skip0)."""
+        """Returns (latent, skip0).  latent may be spatially smaller than skip0."""
         s0 = self.down0(x)         # [B, mid, H, W]
-        z = self.down1(s0)         # [B, latent, H, W]
+        z = self.down1(s0)         # [B, latent, H//s, W//s]
         z = self.bottleneck(z)
         return z, s0
 
 
 class ProgressiveDecoder(nn.Module):
-    """``latent_dim → mid → in_channels`` consuming skip connections."""
+    """``latent_dim → mid → in_channels`` consuming skip connections.
 
-    def __init__(self, in_channels: int, latent_dim: int):
+    When the encoder used spatial downsampling, set ``spatial_upsample=True``
+    so that ``up0`` bilinearly upsamples ``z`` to match the skip's resolution.
+    """
+
+    def __init__(self, in_channels: int, latent_dim: int, spatial_upsample: bool = False):
         super().__init__()
         mid = max((in_channels + latent_dim) // 2, latent_dim)
-        self.up0 = UpBlock(latent_dim, mid, mid)
+        self.up0 = UpBlock(latent_dim, mid, mid, upsample=spatial_upsample)
         self.up1 = nn.Sequential(
             nn.Conv2d(mid, in_channels, 1),
             ResBlock(in_channels),
@@ -152,7 +168,7 @@ class ProgressiveDecoder(nn.Module):
         )
 
     def forward(self, z: torch.Tensor, skip0: torch.Tensor) -> torch.Tensor:
-        x = self.up0(z, skip0)   # [B, mid, H, W]
+        x = self.up0(z, skip0)   # [B, mid, H, W]  (upsampled if needed)
         x = self.up1(x)          # [B, in_channels, H, W]
         return x
 
@@ -284,6 +300,8 @@ class LevelTransmissionStats:
     level: int
     latent_dim: int
     block_size: int
+    spatial_stride: int
+    latent_spatial: tuple[int, int]      # (Lh, Lw) after downsampling
     common_active_ratio: float
     individual_active_ratio: float
 
@@ -316,15 +334,17 @@ class PerLevelMDVSCV2(nn.Module):
         common_keep_ratio: float,
         individual_keep_ratio: float,
         block_size: int,
+        spatial_stride: int = 1,
     ):
         super().__init__()
         self.latent_dim = latent_dim
         self.block_size = block_size
         self.in_channels = in_channels
+        self.spatial_stride = spatial_stride
 
-        # Progressive encoder / decoder with skip connections
-        self.encoder = ProgressiveEncoder(in_channels, latent_dim)
-        self.decoder = ProgressiveDecoder(in_channels, latent_dim)
+        # Progressive encoder / decoder with skip connections + spatial stride
+        self.encoder = ProgressiveEncoder(in_channels, latent_dim, spatial_stride=spatial_stride)
+        self.decoder = ProgressiveDecoder(in_channels, latent_dim, spatial_upsample=(spatial_stride > 1))
 
         # Learnable temporal decomposition
         self.temporal_decomposer = TemporalAttentionDecomposer(latent_dim)
@@ -346,7 +366,9 @@ class PerLevelMDVSCV2(nn.Module):
 
         # Encode – collect skip connections for all frames together
         latent_flat, skip0_flat = self.encoder(flat)
-        latent_seq = latent_flat.view(B, T, self.latent_dim, H, W)
+        # latent may be spatially smaller than input when spatial_stride > 1
+        Lh, Lw = latent_flat.shape[2], latent_flat.shape[3]
+        latent_seq = latent_flat.view(B, T, self.latent_dim, Lh, Lw)
         skip0_seq = skip0_flat.view(B, T, self.encoder.skip0_channels, H, W)
 
         # Temporal decomposition (learned)
@@ -378,6 +400,8 @@ class PerLevelMDVSCV2(nn.Module):
             level=level_index,
             latent_dim=self.latent_dim,
             block_size=self.block_size,
+            spatial_stride=self.spatial_stride,
+            latent_spatial=(Lh, Lw),
             common_active_ratio=float(common_mask.detach().mean().item()),
             individual_active_ratio=float(ind_mask_tensor.detach().mean().item()),
         )
@@ -437,6 +461,7 @@ class ProjectMDVSCV2(nn.Module):
         common_keep_ratios: list[float] | tuple[float, ...] = (0.6, 0.7, 0.8),
         individual_keep_ratios: list[float] | tuple[float, ...] = (0.15, 0.2, 0.25),
         block_sizes: list[int] | tuple[int, ...] = (4, 2, 1),
+        spatial_strides: list[int] | tuple[int, ...] = (2, 2, 1),
         apply_cross_level_fusion: bool = True,
     ):
         super().__init__()
@@ -445,6 +470,7 @@ class ProjectMDVSCV2(nn.Module):
         self.common_keep_ratios = list(common_keep_ratios)
         self.individual_keep_ratios = list(individual_keep_ratios)
         self.block_sizes = list(block_sizes)
+        self.spatial_strides = list(spatial_strides)
         self.apply_cross_level_fusion = apply_cross_level_fusion
 
         if not (
@@ -453,6 +479,7 @@ class ProjectMDVSCV2(nn.Module):
             == len(self.common_keep_ratios)
             == len(self.individual_keep_ratios)
             == len(self.block_sizes)
+            == len(self.spatial_strides)
         ):
             raise ValueError("All per-level config lists must have the same length")
 
@@ -463,13 +490,15 @@ class ProjectMDVSCV2(nn.Module):
                 common_keep_ratio=ckr,
                 individual_keep_ratio=ikr,
                 block_size=bs,
+                spatial_stride=ss,
             )
-            for fc, ld, ckr, ikr, bs in zip(
+            for fc, ld, ckr, ikr, bs, ss in zip(
                 self.feature_channels,
                 self.latent_dims,
                 self.common_keep_ratios,
                 self.individual_keep_ratios,
                 self.block_sizes,
+                self.spatial_strides,
             )
         )
 

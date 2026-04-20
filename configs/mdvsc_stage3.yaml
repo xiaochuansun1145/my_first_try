@@ -30,6 +30,7 @@ mdvsc:
   common_keep_ratios: [0.6, 0.7, 0.8]
   individual_keep_ratios: [0.15, 0.2, 0.25]
   block_sizes: [4, 2, 1]
+  spatial_strides: [2, 2, 1]
   apply_cross_level_fusion: true
   apply_masks: true
   channel_mode: identity

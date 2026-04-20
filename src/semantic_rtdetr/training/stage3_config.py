@@ -56,6 +56,7 @@ class Stage3MDVSCConfig:
     common_keep_ratios: list[float] = field(default_factory=lambda: [0.6, 0.7, 0.8])
     individual_keep_ratios: list[float] = field(default_factory=lambda: [0.15, 0.2, 0.25])
     block_sizes: list[int] = field(default_factory=lambda: [4, 2, 1])
+    spatial_strides: list[int] = field(default_factory=lambda: [2, 2, 1])
     apply_cross_level_fusion: bool = True
     apply_masks: bool = True
     channel_mode: str = "identity"
@@ -145,6 +146,7 @@ def load_stage3_config(config_path: str | Path) -> MDVSCStage3TrainConfig:
             common_keep_ratios=_as_float_list(mdvsc_data.get("common_keep_ratios"), [0.6, 0.7, 0.8]),
             individual_keep_ratios=_as_float_list(mdvsc_data.get("individual_keep_ratios"), [0.15, 0.2, 0.25]),
             block_sizes=_as_int_list(mdvsc_data.get("block_sizes"), [4, 2, 1]),
+            spatial_strides=_as_int_list(mdvsc_data.get("spatial_strides"), [2, 2, 1]),
             apply_cross_level_fusion=bool(mdvsc_data.get("apply_cross_level_fusion", True)),
             apply_masks=bool(mdvsc_data.get("apply_masks", True)),
             channel_mode=str(mdvsc_data.get("channel_mode", "identity")),
