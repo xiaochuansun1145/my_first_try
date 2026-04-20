@@ -1,0 +1,123 @@
+detector:
+  hf_name: PekingU/rtdetr_r50vd
+  local_path: pretrained/rtdetr_r50vd
+  cache_dir:
+  device: auto
+
+data:
+  dataset_name: imagenet_vid
+  train_source_path: /root/autodl-tmp/dataset/VID/raw/ILSVRC2015/Data/VID/train
+  val_source_path:
+  recursive: true
+  index_cache_dir: .cache/stage4_data
+  subset_seed: 42
+  source_fraction: 1.0
+  sample_fraction: 1.0
+  gop_size: 4
+  frame_height: 640
+  frame_width: 640
+  frame_stride: 1
+  gop_stride: 2
+  max_frames_per_source:
+  max_sources:
+  max_samples:
+  train_val_split: 0.1
+
+mdvsc:
+  # SharedEncoder
+  backbone_channels: [512, 1024, 2048]
+  shared_channels: 256
+  # MDVSC v2
+  latent_dims: [64, 80, 96]
+  common_keep_ratios: [0.6, 0.7, 0.8]
+  individual_keep_ratios: [0.15, 0.2, 0.25]
+  block_sizes: [4, 2, 1]
+  spatial_strides: [2, 2, 1]
+  apply_cross_level_fusion: true
+  apply_masks: true
+  channel_mode: identity
+  snr_db: 20.0
+  # Reconstruction
+  reconstruction_hidden_channels: 160
+  reconstruction_detail_channels: 64
+  reconstruction_use_checkpoint: false
+  # Detail bypass
+  stage1_channels: 256
+  detail_latent_channels: 32
+  detail_spatial_size: 20
+
+optimization:
+  batch_size: 1
+  num_workers: 4
+  use_amp: true
+  amp_dtype: float16
+  optimizer: adamw
+  weight_decay: 1.0e-4
+  adam_beta1: 0.9
+  adam_beta2: 0.95
+  scheduler: onecycle
+  onecycle_pct_start: 0.15
+  onecycle_div_factor: 25.0
+  onecycle_final_div_factor: 1000.0
+  grad_clip_norm: 1.0
+  log_every: 10
+  save_every_epochs: 1
+  max_steps_per_epoch:
+  seed: 42
+
+  # Phase 1: freeze SharedEncoder, joint-train rest
+  phase1:
+    epochs: 8
+    lr: 1.0e-4
+    freeze_shared_encoder: true
+    freeze_mdvsc_v2: false
+    freeze_det_recovery: false
+    freeze_detail_bypass: false
+    freeze_reconstruction: false
+
+  # Phase 2: unfreeze SharedEncoder, lower LR
+  phase2:
+    epochs: 8
+    lr: 5.0e-5
+    freeze_shared_encoder: false
+    freeze_mdvsc_v2: false
+    freeze_det_recovery: false
+    freeze_detail_bypass: false
+    freeze_reconstruction: false
+
+  # Phase 3: final fine-tune, minimal LR
+  phase3:
+    epochs: 4
+    lr: 2.0e-5
+    freeze_shared_encoder: false
+    freeze_mdvsc_v2: false
+    freeze_det_recovery: false
+    freeze_detail_bypass: false
+    freeze_reconstruction: false
+
+loss:
+  # Feature compression (Stage 3 objective)
+  feature_loss_type: smooth_l1
+  feature_loss_weight: 1.0
+  level_loss_weights: [1.0, 1.0, 1.0]
+  # Detection recovery (Stage 2.1 objective)
+  det_recovery_weight: 1.0
+  level_recovery_weights: [1.0, 1.0, 1.0]
+  # Reconstruction (Stage 2.1 objective)
+  recon_l1_weight: 1.0
+  recon_mse_weight: 0.25
+  recon_ssim_weight: 0.25
+  recon_edge_weight: 0.2
+  ssim_downsample_factor: 2
+
+output:
+  output_dir: outputs/mdvsc_stage4
+  save_visualizations: true
+  visualization_every_epochs: 1
+  visualization_num_frames: 4
+
+initialization:
+  stage2_1_checkpoint:
+  stage3_checkpoint:
+  full_checkpoint:
+  strict: false

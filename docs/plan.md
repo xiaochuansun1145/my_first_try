@@ -39,3 +39,16 @@
 1. 第一版默认技术路线已经固定为：全部 level 参与传输，latent 维度采用 48/64/96，公共分支按单通道独立选择是否保留，个体分支按空间块结构化稀疏。后续如需调整，应通过小规模消融验证后再改动。
 2. 建议 MVP 首先固定一个公开视频数据集、一个 GOP 长度和一组典型信道参数，避免系统、数据、信道三条轴同时变化导致难以定位问题。
 3. 建议先采用“上界模型 -> 通信模块逼近 -> 信道训练 -> 分层微调”的分阶段训练路线，而不是一开始就把双任务和通信模型一起端到端训练。
+---
+
+**训练阶段里程碑总览**
+
+| 阶段 | 目标 | 训练对象 | 冻结对象 | 输入初始化 |
+|-------|------|---------|---------|-----------|
+| Stage 1 | MDVSC v1 dual-head 验证 | MDVSC v1 + dual decoder | RT-DETR backbone | 随机 |
+| Stage 2 | 无传输上界（SharedEncoder + dual decoder） | SharedEncoder + DetRecovery + ReconHead | RT-DETR | 随机 |
+| Stage 2.1 | Detail Bypass 增强重建 | Stage 2 全部 + DetailCompressor/Decompressor | RT-DETR | Stage 2 ckpt |
+| Stage 3 | MDVSC v2 特征压缩训练 | MDVSC v2 | RT-DETR + SharedEncoder | Stage 2 ckpt (SharedEncoder) |
+| **Stage 4** | **端到端联合训练** | **全部（渐进解冻）** | **RT-DETR backbone** | **Stage 2.1 + Stage 3 ckpt** |
+
+Stage 4 详细文档见 [docs/stage4_training_manual.md](stage4_training_manual.md)。

@@ -708,4 +708,43 @@ stage-1 训练输出目录中当前会生成：
 3. 检测侧：真正的 mAP 必须额外跑标注集评测；当前训练内置的只是 `detection_logit_loss` 和 `detection_box_loss` 两个 teacher-student proxy
 4. 稀疏侧：`common_active_ratio`、`individual_active_ratio`，以及基于它们推导的近似 latent bpp
 
+## 11. Stage 4 端到端联合训练
+
+Stage 4 将 Stage 2.1（SharedEncoder + Detail Bypass + dual decoder）与 Stage 3（MDVSC v2 特征压缩）组装为完整的端到端可微分流水线。
+
+### 数据流
+
+```
+backbone raw → SharedEncoder → MDVSC v2 → DetRecoveryHead → projected 256
+                                        → TaskAdapt + DetailBypass → reconstructed frames
+backbone stage1 → DetailCompressor → DetailDecompressor → fused at stride-8
+```
+
+### 损失构成
+
+| 损失项 | 来源 | 默认权重 |
+|--------|------|---------|
+| feature_loss (smooth_l1) | Stage 3 目标：MDVSC restored vs SharedEncoder output | 1.0 |
+| det_recovery (MSE) | Stage 2.1 目标：DetRecovery vs teacher projected | 1.0 |
+| recon_l1, recon_mse, recon_ssim, recon_edge | Stage 2.1 目标：重建帧 vs 原始帧 | 1.0/0.25/0.25/0.2 |
+
+### 渐进解冻策略
+
+Stage 4 采用 3-Phase 渐进解冻：
+
+- Phase 1 (8 ep, lr=1e-4): SharedEncoder 冻结，其余可训练
+- Phase 2 (8 ep, lr=5e-5): 全部解冻
+- Phase 3 (4 ep, lr=2e-5): 全部解冻，极低 lr 精调
+
+详见 [docs/stage4_training_manual.md](stage4_training_manual.md)。
+
+相关实现入口：
+
+- `src/semantic_rtdetr/semantic_comm/stage4_model.py` — Stage4MDVSC 模型
+- `src/semantic_rtdetr/training/stage4_config.py` — 配置 dataclass
+- `src/semantic_rtdetr/training/stage4_trainer.py` — 训练器
+- `scripts/train_mdvsc_stage4.py` — 训练入口
+- `scripts/plot_stage4_metrics.py` — 训练曲线绘图
+- `configs/mdvsc_stage4.yaml` — 默认配置
+
 这样能把“特征恢复是否稳定”“图像重建是否可用”“检测是否还保真”“通信开销是多少”四条线明确区分开。

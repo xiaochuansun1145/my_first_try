@@ -95,6 +95,9 @@ class Stage3Trainer:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         _set_seed(config.optimization.seed)
 
+        # Fixed input size → enable cuDNN autotuner & suppress plan-failure warnings
+        torch.backends.cudnn.benchmark = True
+
         # ---- Teacher (frozen) ----
         print("[stage3] Loading RT-DETR teacher", flush=True)
         self.baseline = RTDetrBaseline(
